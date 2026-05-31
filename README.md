@@ -48,3 +48,39 @@ services:
       - VLLM_CONTAINER_NAME=vllm-server
     restart: unless-stopped
 ```
+
+## Speculative Decoding & VRAM Optimizations
+
+Running speculative decoding on consumer GPUs (e.g., RTX 3080 10GB) requires careful tuning to avoid Out-Of-Memory (OOM) failures or host RAM swapping under Windows WDDM/WSL2.
+
+### Optimal Configuration for Qwen3.5 4B + 0.8B
+
+- **Base Model**: `cyankiwi/Qwen3.5-4B-AWQ-4bit` (loads in 3.28 GiB).
+- **Draft Model**: `Vishva007/Qwen3.5-0.8B-W4A16-AutoRound-AWQ` (loads from `/models/Qwen3.5-0.8B-AWQ`).
+
+#### Recommended Startup Command (`run_vllm.sh`):
+
+```bash
+#!/bin/sh
+python3 /models/patch_vllm.py
+exec python3 -m vllm.entrypoints.openai.api_server \
+  --model cyankiwi/Qwen3.5-4B-AWQ-4bit \
+  --speculative-model /models/Qwen3.5-0.8B-AWQ \
+  --num-speculative-tokens 5 \
+  --dtype float16 \
+  --enforce-eager \
+  --gpu-memory-utilization 0.70 \
+  --kv-cache-dtype fp8 \
+  --max-model-len 2048 \
+  --max-num-batched-tokens 2048 \
+  --max-num-seqs 4 \
+  --served-model-name unsloth/Qwen3.5-4B-MTP-GGUF \
+  --trust-remote-code
+```
+
+#### Optimization Rules:
+1. **Reduce GPU Memory Utilization**: Set `--gpu-memory-utilization` to `0.70` (or `0.75`). vLLM allocates the draft model out of the *remaining* headroom. If the base model utilization is set too high (e.g. `0.85`), there will not be enough memory left for the draft model's weights and activation state, causing an immediate OOM.
+2. **Limit Max Model Length**: Set `--max-model-len 2048` or `1024`. This reduces the size of the KV cache, freeing up VRAM.
+3. **Use FP8 KV Cache**: Active `--kv-cache-dtype fp8` cuts KV cache memory consumption in half.
+4. **Force Eager Mode**: `--enforce-eager` prevents CUDA graph memory pre-allocations from consuming critical VRAM headroom.
+
