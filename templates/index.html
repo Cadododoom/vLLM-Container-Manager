@@ -44,7 +44,7 @@
         <div class="logo-section">
             <div class="logo-icon">🚀</div>
             <div class="logo-text">
-                <h1>vLLM Manager</h1>
+                <h1>vLLM Manager <span id="app-version" style="font-size: 13px; opacity: 0.8; vertical-align: middle; background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 4px; font-weight: normal; margin-left: 8px;">v1.000</span></h1>
                 <span>EPYC Workstation Stack Control</span>
             </div>
         </div>
@@ -289,7 +289,45 @@
                             <input type="text" id="hf-filename" class="input-control" placeholder="model.gguf">
                         </div>
 
-                        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 10px;" id="btn-download-start">Download Model</button>
+                        <details style="margin-top: 15px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 10px; background: rgba(255,255,255,0.02);">
+                            <summary style="font-size: 12px; font-weight: 600; cursor: pointer; color: var(--accent-cyan); display: flex; align-items: center; gap: 6px; user-select: none;">
+                                <span>⚙️</span> Advanced Download Options
+                            </summary>
+                            <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 10px;">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label for="hf-token" style="font-size: 11px; margin-bottom: 4px;">
+                                        Hugging Face Token (Optional)
+                                        <span class="desc" style="font-size: 10px;">Required for private or gated models (e.g. Llama-3).</span>
+                                    </label>
+                                    <input type="password" id="hf-token" class="input-control mono" placeholder="hf_..." style="padding: 6px 10px; font-size: 12px;">
+                                </div>
+                                <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 5px;">
+                                    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; user-select: none;">
+                                        <input type="checkbox" id="hf-mirror-endpoint" style="accent-color: var(--accent-cyan);">
+                                        Use HF Mirror (hf-mirror.com)
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; user-select: none;">
+                                        <input type="checkbox" id="hf-enable-transfer" style="accent-color: var(--accent-cyan);" onchange="toggleTransferWarning()">
+                                        Enable High-Speed (hf-transfer)
+                                    </label>
+                                    <div id="hf-transfer-warning" style="display: none; font-size: 10px; color: var(--accent-orange); line-height: 1.3; margin-top: 2px;">
+                                        ⚠️ Note: High-Speed transfer downloads faster but does not show a percentage bar (will show progress state as "High-Speed downloading...").
+                                    </div>
+                                </div>
+                                <div class="grid-2" style="margin-top: 5px;">
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="hf-max-retries" style="font-size: 11px; margin-bottom: 4px;">Max Retries</label>
+                                        <input type="number" id="hf-max-retries" class="input-control" value="5" min="1" max="20" style="padding: 6px 10px; font-size: 12px;">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="hf-inactivity-timeout" style="font-size: 11px; margin-bottom: 4px;">Timeout (s)</label>
+                                        <input type="number" id="hf-inactivity-timeout" class="input-control" value="1200" min="10" max="3600" style="padding: 6px 10px; font-size: 12px;">
+                                    </div>
+                                </div>
+                            </div>
+                        </details>
+
+                        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 15px;" id="btn-download-start">Download Model</button>
                     </form>
 
                     <!-- Download Progress -->
@@ -353,6 +391,7 @@
                 <button class="config-nav-btn" onclick="switchConfigSection('performance')" id="cfg-nav-performance">⚡ Performance Flags</button>
                 <button class="config-nav-btn" onclick="switchConfigSection('advanced')" id="cfg-nav-advanced">🔧 Advanced Flags</button>
                 <button class="config-nav-btn" onclick="switchConfigSection('backups')" id="cfg-nav-backups" style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 15px;">💾 Configuration Backups</button>
+                <button class="config-nav-btn" onclick="switchConfigSection('update')" id="cfg-nav-update" style="margin-top: 10px; border-top: 1px solid var(--border-color); padding-top: 15px;">🔄 System Update</button>
             </div>
 
             <!-- Configuration Form -->
@@ -485,6 +524,56 @@
                                 Recommended layout: <strong>TP = 1, PP = 1</strong> (Single GPU Mode).
                             </div>
                             <button type="button" class="btn btn-sm btn-primary" id="btn-apply-parallel-rec" onclick="applyParallelRecommendation()" style="font-size: 11px; width: 100%; height: 32px; font-weight: bold;">Apply Recommended Partition Split</button>
+                        </div>
+
+                        <!-- Speculative & VRAM Allocation Advisor -->
+                        <div class="speculative-advisor-card" style="margin-top: 24px; padding: 18px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-md); box-shadow: 0 4px 20px rgba(0,0,0,0.15);">
+                            <h5 style="margin-bottom: 14px; display: flex; align-items: center; gap: 8px; color: var(--accent-cyan); font-size: 13px; font-weight: bold;">
+                                <span>🔮</span> VRAM Allocation & Speculative Advisor
+                            </h5>
+                            
+                            <!-- Stacked bar visualization -->
+                            <div class="vram-stacked-bar-container" style="margin-bottom: 16px;">
+                                <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 6px; color: var(--text-secondary);">
+                                    <span id="vram-bar-label">Pre-calculating VRAM layout limits:</span>
+                                    <span id="vram-bar-total-text" class="mono">Total VRAM: -- GB</span>
+                                </div>
+                                <div class="vram-stacked-bar" style="display: flex; height: 28px; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">
+                                    <div id="vram-bar-base-weights" style="width: 0%; background: #4c6ef5; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: white; transition: width 0.3s;" title="Base Model Weights">Base</div>
+                                    <div id="vram-bar-base-overhead" style="width: 0%; background: #5c7cfa; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: white; opacity: 0.8; transition: width 0.3s;" title="Base Model Overhead">Overhead</div>
+                                    <div id="vram-bar-kv-cache" style="width: 0%; background: #0ca678; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: white; transition: width 0.3s;" title="KV Cache">KV Cache</div>
+                                    <div id="vram-bar-draft-weights" style="width: 0%; background: #f59f00; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: white; transition: width 0.3s;" title="Draft Model Weights">Draft</div>
+                                    <div id="vram-bar-draft-overhead" style="width: 0%; background: #fcc419; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: white; opacity: 0.8; transition: width 0.3s;" title="Draft Model Overhead">Draft OH</div>
+                                    <div id="vram-bar-free" style="width: 100%; background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-muted); transition: width 0.3s;" title="Free Headroom">Free</div>
+                                </div>
+                                <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 10px; color: var(--text-muted);">
+                                    <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #4c6ef5; border-radius: 2px;"></span> Base Weights</span>
+                                    <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #5c7cfa; border-radius: 2px; opacity: 0.8;"></span> Base OH (~0.8GB)</span>
+                                    <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #0ca678; border-radius: 2px;"></span> KV Cache</span>
+                                    <span id="vram-bar-legend-draft" style="display: none; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #f59f00; border-radius: 2px;"></span> Draft Weights</span>
+                                    <span id="vram-bar-legend-draft-oh" style="display: none; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #fcc419; border-radius: 2px; opacity: 0.8;"></span> Draft OH (~0.5GB)</span>
+                                    <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: rgba(255,255,255,0.2); border-radius: 2px;"></span> Free Headroom</span>
+                                </div>
+                            </div>
+
+                            <!-- Feasibility Range / Advice -->
+                            <div class="advisor-info-box" style="padding: 12px; border-radius: var(--radius-sm); background: rgba(255, 255, 255, 0.01); border: 1px dashed rgba(255, 255, 255, 0.07); margin-bottom: 12px;">
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
+                                    <span style="color: var(--text-secondary);">Safe memory-utilization Range:</span>
+                                    <span id="vram-advisor-range" style="font-weight: bold; color: var(--accent-cyan);" class="mono">--</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
+                                    <span style="color: var(--text-secondary);">Current Setting:</span>
+                                    <span id="vram-advisor-current" style="font-weight: bold;" class="mono">--</span>
+                                </div>
+                                <div id="vram-advisor-alert" style="font-size: 11px; margin-top: 10px; line-height: 1.4; color: var(--text-secondary);">
+                                    Calculations pending... Enter a model path to compute.
+                                </div>
+                            </div>
+                            
+                            <div style="display: flex; gap: 8px;">
+                                <button type="button" class="btn btn-sm btn-success" id="btn-vram-apply-safe" onclick="applySafeUtilization()" style="font-size: 11px; display: none;">Apply Safe Limit</button>
+                            </div>
                         </div>
 
                         <!-- GPU Auto-Tuning Card -->
@@ -871,7 +960,38 @@
                         </div>
                     </div>
 
-                    <div style="margin-top: 24px; border-top: 1px solid var(--border-color); padding-top: 20px; display: flex; justify-content: flex-end; gap: 12px;">
+                    <!-- SECTION 7: SYSTEM UPDATE -->
+                    <div id="cfg-sect-update" class="config-section">
+                        <h3 style="margin-bottom: 16px;">System Update & Version Control</h3>
+                        <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">
+                            Check the current version of the vLLM Container Manager and pull the latest code updates directly from GitHub.
+                        </p>
+                        
+                        <div class="card" style="margin-bottom: 20px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                            <div class="card-body" style="padding: 20px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+                                    <div>
+                                        <div style="font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); font-weight: 600;">Current Version</div>
+                                        <div id="cfg-current-version-text" style="font-size: 28px; font-weight: 800; color: var(--accent-purple); margin-top: 4px;">v1.000</div>
+                                    </div>
+                                    <button type="button" class="btn btn-primary" onclick="pullSystemUpdate()" id="btn-pull-update" style="display: flex; align-items: center; gap: 8px; font-weight: 600;">
+                                        🔄 Pull Update from GitHub
+                                    </button>
+                                </div>
+                                
+                                <div id="update-status-msg" style="font-size: 13px; color: var(--text-muted); margin-top: 15px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.05);">
+                                    Ready. Updates are pulled from the main branch.
+                                </div>
+                                
+                                <div id="update-console-container" style="display: none; margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 15px;">
+                                    <span style="font-size: 13px; font-weight: 600; display: block; margin-bottom: 8px; color: var(--text-color);">Git Pull Logs:</span>
+                                    <div class="download-console" id="update-git-console" style="height: 180px; font-family: monospace; font-size: 12px; background: rgba(0,0,0,0.5); padding: 12px; border-radius: 6px; overflow-y: auto; white-space: pre-wrap; color: #5efb6e; border: 1px solid rgba(255,255,255,0.05);"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="config-form-footer" style="margin-top: 24px; border-top: 1px solid var(--border-color); padding-top: 20px; display: flex; justify-content: flex-end; gap: 12px;">
                         <button type="button" class="btn" onclick="loadConfiguration()">Reset Fields</button>
                         <button type="submit" class="btn btn-primary" id="btn-save-config">Review & Save Config</button>
                     </div>
@@ -963,7 +1083,7 @@
             <!-- Left Side: Benchmark Configuration & Console -->
             <div style="display: flex; flex-direction: column; gap: 24px;">
                 <div class="card">
-                    <div class="card-title">Run Concurrency Benchmark</div>
+                    <div class="card-title">Run Performance Benchmarks</div>
                     <form id="benchmark-run-form" onsubmit="startBenchmarkRun(event)">
                         <div class="form-group">
                             <label for="bench-model">
@@ -972,11 +1092,32 @@
                             </label>
                             <input type="text" id="bench-model" class="input-control mono" readonly style="background: var(--bg-secondary); cursor: not-allowed;" placeholder="No active model loaded">
                         </div>
+
                         <div class="grid-2" style="margin-bottom: 16px;">
                             <div class="form-group" style="margin-bottom: 0;">
-                                <label for="bench-concurrency">
+                                <label for="bench-type">
+                                    Benchmark Type
+                                    <span class="desc">Select load sweep metric.</span>
+                                </label>
+                                <select id="bench-type" class="input-control" onchange="toggleBenchmarkFields()">
+                                    <option value="concurrency">Concurrency Sweep</option>
+                                    <option value="temperature">Speculative Temperature Sweep</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0; display: none;" id="fixed-concurrency-group">
+                                <label for="bench-fixed-concurrency">
+                                    Fixed Concurrency
+                                    <span class="desc">Parallel clients to run (default: 2)</span>
+                                </label>
+                                <input type="number" id="bench-fixed-concurrency" class="input-control" value="2" min="1" max="64">
+                            </div>
+                        </div>
+
+                        <div class="grid-2" style="margin-bottom: 16px;">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label for="bench-concurrency" id="bench-concurrency-label">
                                     Concurrency Levels
-                                    <span class="desc">Comma-separated list (e.g. 1,2,4,8,16,32)</span>
+                                    <span class="desc" id="bench-concurrency-desc">Comma-separated list (e.g. 1,2,4,8,16,32)</span>
                                 </label>
                                 <input type="text" id="bench-concurrency" class="input-control" value="1,2,4,8,16,32" required>
                             </div>
@@ -1046,18 +1187,29 @@
                     <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
                         <thead>
                             <tr style="border-bottom: 2px solid var(--border-color); color: var(--text-secondary);">
-                                <th style="padding: 10px 8px; font-weight: 600;">Concurrency</th>
+                                <th style="padding: 10px 8px; font-weight: 600;" id="bench-table-header-metric">Concurrency</th>
                                 <th style="padding: 10px 8px; font-weight: 600;">Throughput (tok/s)</th>
                                 <th style="padding: 10px 8px; font-weight: 600;">Avg Latency (s)</th>
+                                <th style="padding: 10px 8px; font-weight: 600;">Speculative Acceptance</th>
                                 <th style="padding: 10px 8px; font-weight: 600;">Completion Rate</th>
                             </tr>
                         </thead>
                         <tbody id="bench-results-tbody">
                             <tr>
-                                <td colspan="4" style="padding: 15px 8px; text-align: center; color: var(--text-muted);">No benchmark results yet. Start a run.</td>
+                                <td colspan="5" style="padding: 15px 8px; text-align: center; color: var(--text-muted);">No benchmark results yet. Start a run.</td>
                             </tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- Diagnostic Card -->
+                <div class="card" id="bench-diagnostic-card" style="display: none;">
+                    <div class="card-title" style="color: var(--accent-cyan); display: flex; align-items: center; gap: 8px;">
+                        <span>📋</span> Benchmark Diagnostic & Suggestions
+                    </div>
+                    <div id="bench-diagnostic-content" style="font-size: 13px; line-height: 1.6; color: var(--text-secondary); display: flex; flex-direction: column; gap: 12px;">
+                        <!-- Dynamic analysis -->
+                    </div>
                 </div>
             </div>
         </div>
@@ -1279,6 +1431,7 @@
 
     // App Initialization
     window.onload = function() {
+        loadAppVersion();
         startStatusPolling();
         initMetricsChart();
         loadLocalModels();
@@ -1728,6 +1881,65 @@
     }
 
     // CONTAINER CONTROL
+    let activeRestartPollInterval = null;
+
+    function pollRestartStatus(restartId) {
+        if (activeRestartPollInterval) clearInterval(activeRestartPollInterval);
+        
+        const loaderDetails = document.getElementById('loader-details-text');
+        const loaderLogs = document.getElementById('loader-logs-console');
+        const loaderProgress = document.getElementById('loader-progress-bar');
+        const loaderPhase = document.getElementById('loader-phase-badge');
+        const loaderCloseBtn = document.getElementById('btn-loader-close');
+
+        activeRestartPollInterval = setInterval(() => {
+            fetch(`/api/container/restart/status?restart_id=${restartId}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (loaderLogs) {
+                        loaderLogs.innerText = data.logs || '';
+                        loaderLogs.scrollTop = loaderLogs.scrollHeight;
+                    }
+                    if (data.status === 'completed') {
+                        clearInterval(activeRestartPollInterval);
+                        if (loaderDetails) loaderDetails.innerText = "Container restarted successfully and passed health check!";
+                        if (loaderProgress) loaderProgress.style.width = "100%";
+                        if (loaderPhase) {
+                            loaderPhase.innerText = "SUCCESS";
+                            loaderPhase.style.background = 'rgba(12, 166, 120, 0.15)';
+                            loaderPhase.style.color = '#0ca678';
+                        }
+                        if (loaderCloseBtn) loaderCloseBtn.style.display = 'inline-block';
+                        showToast("Container restarted successfully and is online!", "success");
+                        setTimeout(() => {
+                            closeLoadingOverlay();
+                        }, 2000);
+                    } else if (data.status === 'failed') {
+                        clearInterval(activeRestartPollInterval);
+                        if (loaderDetails) loaderDetails.innerHTML = `<span style="color:#ef4444; font-weight:bold;">Update Failed:</span> ${data.error || 'Check logs'}`;
+                        if (loaderProgress) {
+                            loaderProgress.style.width = "100%";
+                            loaderProgress.style.background = "#ef4444";
+                        }
+                        if (loaderPhase) {
+                            loaderPhase.innerText = "FAILED";
+                            loaderPhase.style.background = 'rgba(239, 68, 68, 0.15)';
+                            loaderPhase.style.color = '#ef4444';
+                        }
+                        if (loaderCloseBtn) loaderCloseBtn.style.display = 'inline-block';
+                        showToast(data.error || "Update failed and rolled back.", "error");
+                    } else {
+                        if (loaderDetails) loaderDetails.innerText = "Monitoring container health check...";
+                        if (loaderProgress) loaderProgress.style.width = "60%";
+                        if (loaderPhase) loaderPhase.innerText = "MONITORING";
+                    }
+                })
+                .catch(err => {
+                    console.error("Error polling restart status:", err);
+                });
+        }, 1000);
+    }
+
     function controlContainer(action) {
         const dot = document.getElementById('status-dot');
         const text = document.getElementById('status-text');
@@ -1745,6 +1957,9 @@
             .then(res => res.json())
             .then(data => {
                 showToast(data.message, 'success');
+                if (action === 'restart' && data.restart_id) {
+                    pollRestartStatus(data.restart_id);
+                }
                 fetchStatus();
             })
             .catch(err => {
@@ -1880,10 +2095,20 @@
     }
 
     // HF DOWNLOADER
+    function toggleTransferWarning() {
+        const checked = document.getElementById('hf-enable-transfer').checked;
+        document.getElementById('hf-transfer-warning').style.display = checked ? 'block' : 'none';
+    }
+
     function downloadHFModel(event) {
         event.preventDefault();
         let repoId = document.getElementById('hf-repo-id').value.trim();
         const filename = document.getElementById('hf-filename').value.trim();
+        const token = document.getElementById('hf-token').value.trim() || null;
+        const useMirror = document.getElementById('hf-mirror-endpoint').checked;
+        const enableTransfer = document.getElementById('hf-enable-transfer').checked;
+        const maxRetries = parseInt(document.getElementById('hf-max-retries').value) || 5;
+        const inactivityTimeout = parseInt(document.getElementById('hf-inactivity-timeout').value) || 1200;
 
         // Extract repo ID from full huggingface.co URLs if pasted
         const hfUrlRegex = /huggingface\.co\/([^/]+\/[^/]+)/i;
@@ -1902,7 +2127,15 @@
         fetch('/api/models/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ repo_id: repoId, filename: filename || null })
+            body: JSON.stringify({
+                repo_id: repoId,
+                filename: filename || null,
+                token: token,
+                use_mirror: useMirror,
+                enable_transfer: enableTransfer,
+                max_retries: maxRetries,
+                inactivity_timeout: inactivityTimeout
+            })
         })
         .then(res => {
             if (!res.ok) {
@@ -2012,6 +2245,82 @@
         
         document.getElementById(`cfg-sect-${sectionId}`).classList.add('active');
         document.getElementById(`cfg-nav-${sectionId}`).classList.add('active');
+        
+        const footer = document.getElementById('config-form-footer');
+        if (footer) {
+            if (sectionId === 'update') {
+                footer.style.display = 'none';
+            } else {
+                footer.style.display = 'flex';
+            }
+        }
+    }
+
+    function loadAppVersion() {
+        fetch('/api/version')
+            .then(res => res.json())
+            .then(data => {
+                const ver = data.version || '1.000';
+                document.getElementById('app-version').innerText = 'v' + ver;
+                const cfgVer = document.getElementById('cfg-current-version-text');
+                if (cfgVer) cfgVer.innerText = 'v' + ver;
+            })
+            .catch(err => console.error('Error loading version:', err));
+    }
+
+    let systemUpdateInterval = null;
+
+    function pullSystemUpdate() {
+        const btn = document.getElementById('btn-pull-update');
+        const statusMsg = document.getElementById('update-status-msg');
+        const consoleContainer = document.getElementById('update-console-container');
+        const consoleEl = document.getElementById('update-git-console');
+        
+        btn.disabled = true;
+        btn.innerHTML = '🔄 Pulling Updates...';
+        statusMsg.innerHTML = '<span style="color: var(--accent-cyan);">Starting git pull...</span>';
+        consoleContainer.style.display = 'block';
+        consoleEl.innerText = 'Initializing git connection...\n';
+        
+        fetch('/api/update', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (systemUpdateInterval) clearInterval(systemUpdateInterval);
+                systemUpdateInterval = setInterval(pollSystemUpdateStatus, 1000);
+            })
+            .catch(err => {
+                btn.disabled = false;
+                btn.innerHTML = '🔄 Pull Update from GitHub';
+                statusMsg.innerHTML = '<span style="color: var(--status-red);">Failed to trigger update.</span>';
+                consoleEl.innerText += '\n[Error] ' + err;
+            });
+    }
+
+    function pollSystemUpdateStatus() {
+        fetch('/api/update/status')
+            .then(res => res.json())
+            .then(data => {
+                const consoleEl = document.getElementById('update-git-console');
+                const statusMsg = document.getElementById('update-status-msg');
+                const btn = document.getElementById('btn-pull-update');
+                
+                consoleEl.innerText = data.logs || '';
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+                
+                if (data.status === 'completed') {
+                    clearInterval(systemUpdateInterval);
+                    statusMsg.innerHTML = '<span style="color: #5efb6e; font-weight: bold;">✓ Update completed successfully! Please restart the UI container to apply changes.</span>';
+                    btn.disabled = false;
+                    btn.innerHTML = '🔄 Pull Update from GitHub';
+                    loadAppVersion();
+                } else if (data.status === 'failed') {
+                    clearInterval(systemUpdateInterval);
+                    statusMsg.innerHTML = `<span style="color: var(--status-red); font-weight: bold;">❌ Update failed: ${data.error || 'Unknown error'}</span>`;
+                    btn.disabled = false;
+                    btn.innerHTML = '🔄 Pull Update from GitHub';
+                }
+            })
+            .catch(err => console.error('Error polling update status:', err));
     }
 
     function loadConfiguration() {
@@ -2136,6 +2445,39 @@
                         addAdvancedFlagRow(key, data.args[key]);
                     }
                 });
+
+                // Bind real-time synchronization to main settings
+                const mainUtil = document.getElementById('cfg-gpu-memory-utilization');
+                const mainDtype = document.getElementById('cfg-kv-cache-dtype');
+                const mainSpecMode = document.getElementById('cfg-speculative-mode');
+                const mainSpecModel = document.getElementById('cfg-speculative-model');
+                const mainModelInput = document.getElementById('cfg-model');
+                const mainTP = document.getElementById('cfg-tensor-parallel-size');
+
+                if (mainUtil) {
+                    mainUtil.removeEventListener('input', syncMainToCalculator);
+                    mainUtil.addEventListener('input', syncMainToCalculator);
+                }
+                if (mainDtype) {
+                    mainDtype.removeEventListener('change', syncMainToCalculator);
+                    mainDtype.addEventListener('change', syncMainToCalculator);
+                }
+                if (mainSpecMode) {
+                    mainSpecMode.removeEventListener('change', syncMainToCalculator);
+                    mainSpecMode.addEventListener('change', syncMainToCalculator);
+                }
+                if (mainSpecModel) {
+                    mainSpecModel.removeEventListener('input', syncMainToCalculator);
+                    mainSpecModel.addEventListener('input', syncMainToCalculator);
+                }
+                if (mainModelInput) {
+                    mainModelInput.removeEventListener('input', syncMainToCalculator);
+                    mainModelInput.addEventListener('input', syncMainToCalculator);
+                }
+                if (mainTP) {
+                    mainTP.removeEventListener('input', syncMainToCalculator);
+                    mainTP.addEventListener('input', syncMainToCalculator);
+                }
             })
             .catch(err => alert("Failed to load vLLM configs: " + err))
             .finally(() => {
@@ -3181,6 +3523,11 @@
     // KV Cache Calculator & Auto-Tuning Functions
     window.calculatedMaxTokensPool = 0;
     window.contextCapacityData = null;
+    window.speculativeMode = 'disabled';
+    window.draftWeightSize = 0.0;
+    window.draftName = 'None';
+    window.lastResolvedMainModel = '';
+    window.lastResolvedDraftModel = '';
 
     function fetchContextCapacity() {
         return fetch('/api/config/context_capacity')
@@ -3203,6 +3550,13 @@
                     // precision from form
                     const prec = document.getElementById('cfg-kv-cache-dtype').value || 'auto';
                     document.getElementById('calc-precision').value = prec;
+                    
+                    // Speculative decoding variables
+                    window.speculativeMode = data.speculative_mode || 'disabled';
+                    window.draftWeightSize = data.draft_weight_size_gb || 0.0;
+                    window.draftName = data.draft_name || 'None';
+                    window.lastResolvedMainModel = data.model_path || '';
+                    window.lastResolvedDraftModel = data.draft_model_path || '';
                 }
                 
                 // Recalculate context & seats
@@ -3222,11 +3576,25 @@
 
         const bytesPerElement = precision === 'fp8' ? 1 : 2;
         
-        // VRAM allocated to vLLM in bytes
+        // Speculative decoding variables
+        const specMode = window.speculativeMode || 'disabled';
+        
+        // Scale model weights by Tensor Parallelism
+        const tp = parseInt(document.getElementById('cfg-tensor-parallel-size')?.value) || 1;
+        const baseWeightGB = weightSize / tp;
+        const draftWeightGB = ((specMode === 'draft_model') ? (window.draftWeightSize || 0.0) : 0.0) / tp;
+        
+        // Update bar label dynamically based on TP
+        const barLabelEl = document.getElementById('vram-bar-label');
+        if (barLabelEl) {
+            barLabelEl.innerText = tp > 1 ? `Pre-calculating VRAM layout limits (Per GPU, TP=${tp}):` : `Pre-calculating VRAM layout limits:`;
+        }
+
+        // VRAM allocated to vLLM in bytes (per GPU)
         const vllmAllocatedBytes = vramTotal * gpuUtil * 1024 * 1024 * 1024;
-        // Model weights size in bytes
-        const weightSizeBytes = weightSize * 1024 * 1024 * 1024;
-        // System overhead default (e.g. 0.8 GB)
+        // Model weights size in bytes (sharded per GPU)
+        const weightSizeBytes = baseWeightGB * 1024 * 1024 * 1024;
+        // System overhead default (e.g. 0.8 GB per GPU)
         const overheadBytes = 0.8 * 1024 * 1024 * 1024;
 
         // KV Cache bytes available
@@ -3237,7 +3605,9 @@
 
         let totalTokens = 0;
         if (bytesPerTokenAllLayers > 0) {
-            totalTokens = Math.floor(kvCacheBytes / bytesPerTokenAllLayers);
+            // Because KV heads are sharded per GPU, the per-GPU token capacity is:
+            // kvCacheBytes_per_GPU / (bytesPerTokenAllLayers / tp) = tp * (kvCacheBytes_per_GPU / bytesPerTokenAllLayers)
+            totalTokens = Math.floor(kvCacheBytes / (bytesPerTokenAllLayers / tp));
         }
 
         window.calculatedMaxTokensPool = totalTokens;
@@ -3274,6 +3644,135 @@
             targetSlider.max = Math.max(window.calculatedMaxTokensPool || 84609, 131072);
         }
         updateAgentPlanner();
+
+        // Speculative & VRAM Allocation Advisor Updates
+        const baseOverheadGB = 0.8;
+        const draftOverheadGB = specMode === 'draft_model' ? 0.5 : 0.0;
+        const kvCacheGB = kvCacheBytes / (1024 * 1024 * 1024);
+        
+        // Pct Calculations
+        const baseWeightPct = (baseWeightGB / vramTotal) * 100;
+        const baseOverheadPct = (baseOverheadGB / vramTotal) * 100;
+        const kvCachePct = (kvCacheGB / vramTotal) * 100;
+        const draftWeightPct = (draftWeightGB / vramTotal) * 100;
+        const draftOverheadPct = (draftOverheadGB / vramTotal) * 100;
+        const freePct = Math.max(0, 100 - baseWeightPct - baseOverheadPct - kvCachePct - draftWeightPct - draftOverheadPct);
+
+        document.getElementById('vram-bar-base-weights').style.width = `${baseWeightPct}%`;
+        document.getElementById('vram-bar-base-weights').innerText = baseWeightGB > 0.5 ? `Base (${baseWeightGB.toFixed(1)}G)` : '';
+        
+        document.getElementById('vram-bar-base-overhead').style.width = `${baseOverheadPct}%`;
+        document.getElementById('vram-bar-base-overhead').innerText = baseOverheadGB > 0.5 ? `OH (${baseOverheadGB.toFixed(1)}G)` : '';
+        
+        document.getElementById('vram-bar-kv-cache').style.width = `${kvCachePct}%`;
+        document.getElementById('vram-bar-kv-cache').innerText = kvCacheGB > 0.5 ? `KV Cache (${kvCacheGB.toFixed(1)}G)` : '';
+        
+        const draftWeightEl = document.getElementById('vram-bar-draft-weights');
+        const draftOverheadEl = document.getElementById('vram-bar-draft-overhead');
+        const draftLegend = document.getElementById('vram-bar-legend-draft');
+        const draftLegendOh = document.getElementById('vram-bar-legend-draft-oh');
+        
+        if (specMode === 'draft_model') {
+            draftWeightEl.style.width = `${draftWeightPct}%`;
+            draftWeightEl.style.display = 'flex';
+            draftWeightEl.innerText = draftWeightGB > 0.5 ? `Draft (${draftWeightGB.toFixed(1)}G)` : '';
+            
+            draftOverheadEl.style.width = `${draftOverheadPct}%`;
+            draftOverheadEl.style.display = 'flex';
+            draftOverheadEl.innerText = draftOverheadGB > 0.2 ? `OH (${draftOverheadGB.toFixed(1)}G)` : '';
+            
+            if (draftLegend) draftLegend.style.display = 'flex';
+            if (draftLegendOh) draftLegendOh.style.display = 'flex';
+        } else {
+            draftWeightEl.style.width = '0%';
+            draftWeightEl.style.display = 'none';
+            
+            draftOverheadEl.style.width = '0%';
+            draftOverheadEl.style.display = 'none';
+            
+            if (draftLegend) draftLegend.style.display = 'none';
+            if (draftLegendOh) draftLegendOh.style.display = 'none';
+        }
+        
+        document.getElementById('vram-bar-free').style.width = `${freePct}%`;
+        const freeGB = vramTotal - baseWeightGB - baseOverheadGB - kvCacheGB - draftWeightGB - draftOverheadGB;
+        document.getElementById('vram-bar-free').innerText = freeGB > 0.5 ? `Free (${freeGB.toFixed(1)}G)` : '';
+        document.getElementById('vram-bar-total-text').innerText = `Total VRAM: ${vramTotal.toFixed(2)} GB`;
+        
+        // Advisor rules
+        const safeMin = Math.max(0.30, parseFloat(((baseWeightGB + baseOverheadGB) / vramTotal).toFixed(2)));
+        const safeMax = Math.min(0.95, parseFloat((1.0 - (draftWeightGB + draftOverheadGB) / vramTotal).toFixed(2)));
+        
+        const rangeEl = document.getElementById('vram-advisor-range');
+        const currentEl = document.getElementById('vram-advisor-current');
+        const alertEl = document.getElementById('vram-advisor-alert');
+        const applyBtn = document.getElementById('btn-vram-apply-safe');
+        
+        if (specMode === 'mtp_head') {
+            rangeEl.innerText = `${safeMin} - 0.95`;
+            const isSafe = (gpuUtil >= safeMin && gpuUtil <= 0.95);
+            currentEl.innerText = `${gpuUtil.toFixed(2)} (${isSafe ? 'Safe' : 'Outside safe range'})`;
+            currentEl.style.color = isSafe ? 'var(--status-green)' : 'var(--status-red)';
+            
+            if (isSafe) {
+                alertEl.innerHTML = `✓ <strong>Status:</strong> MTP/Draft heads active. No separate draft model weights loaded. Your utilization is within the safe range.`;
+                applyBtn.style.display = 'none';
+            } else {
+                alertEl.innerHTML = `⚠️ <strong>Warning:</strong> Utilization setting is ${gpuUtil < safeMin ? 'too low' : 'too high'}. Adjust slider to be within ${safeMin} - 0.95.`;
+                applyBtn.style.display = 'inline-block';
+                window.recommendedSafeUtil = Math.min(0.90, Math.max(safeMin + 0.05, 0.85));
+            }
+        } else if (specMode === 'draft_model') {
+            if (safeMin > safeMax) {
+                rangeEl.innerText = `Infeasible`;
+                rangeEl.style.color = 'var(--status-red)';
+                currentEl.innerText = `${gpuUtil.toFixed(2)} (Infeasible)`;
+                currentEl.style.color = 'var(--status-red)';
+                alertEl.innerHTML = `<span style="color:var(--status-red); font-weight:bold;">❌ Critical Conflict:</span> The combined sizes of the base model (${baseWeightGB.toFixed(1)}GB + overhead) and draft model (${draftWeightGB.toFixed(1)}GB + overhead) exceed your GPU VRAM (${vramTotal.toFixed(1)}GB). 
+                <br><br><strong>To resolve this:</strong>
+                <ul style="margin: 4px 0 0 16px; padding: 0; color: var(--text-secondary);">
+                    <li>Switch speculative mode to <strong>MTP/Draft Heads</strong> (uses near-zero weight overhead).</li>
+                    <li>Select a smaller base model or a smaller/more quantized draft model.</li>
+                    <li>Disable speculative decoding.</li>
+                </ul>`;
+                applyBtn.style.display = 'none';
+            } else {
+                rangeEl.innerText = `${safeMin} - ${safeMax}`;
+                rangeEl.style.color = 'var(--accent-cyan)';
+                
+                const isSafe = (gpuUtil >= safeMin && gpuUtil <= safeMax);
+                currentEl.innerText = `${gpuUtil.toFixed(2)} (${isSafe ? 'Safe' : 'Outside safe range'})`;
+                currentEl.style.color = isSafe ? 'var(--status-green)' : 'var(--status-red)';
+                
+                if (isSafe) {
+                    alertEl.innerHTML = `✓ <strong>Status:</strong> Speculative decoding active. Remaining VRAM headroom (${freeGB.toFixed(1)} GB) is sufficient for draft model loading.`;
+                    applyBtn.style.display = 'none';
+                } else {
+                    if (gpuUtil > safeMax) {
+                        alertEl.innerHTML = `⚠️ <strong>Warning:</strong> Utilization (${gpuUtil.toFixed(2)}) is <strong>too high</strong>! Remaining headroom is only ${(vramTotal * (1 - gpuUtil)).toFixed(1)} GB, but the draft model needs at least ${(draftWeightGB + draftOverheadGB).toFixed(1)} GB. This configuration <strong>will cause an OOM crash</strong> on startup.`;
+                    } else {
+                        alertEl.innerHTML = `⚠️ <strong>Warning:</strong> Utilization (${gpuUtil.toFixed(2)}) is <strong>too low</strong> to fit the base model weights plus required KV cache structures.`;
+                    }
+                    applyBtn.style.display = 'inline-block';
+                    window.recommendedSafeUtil = parseFloat((safeMax - 0.02).toFixed(2));
+                }
+            }
+        } else {
+            rangeEl.innerText = `${safeMin} - 0.95`;
+            rangeEl.style.color = 'var(--accent-cyan)';
+            const isSafe = (gpuUtil >= safeMin && gpuUtil <= 0.95);
+            currentEl.innerText = `${gpuUtil.toFixed(2)} (${isSafe ? 'Safe' : 'Outside safe range'})`;
+            currentEl.style.color = isSafe ? 'var(--status-green)' : 'var(--status-red)';
+            
+            if (isSafe) {
+                alertEl.innerHTML = `✓ <strong>Status:</strong> Standard mode active. The base model weights fit. Your utilization is within the safe range.`;
+                applyBtn.style.display = 'none';
+            } else {
+                alertEl.innerHTML = `⚠️ <strong>Warning:</strong> Utilization is too low to run the base model. Please increase to at least ${safeMin}.`;
+                applyBtn.style.display = 'inline-block';
+                window.recommendedSafeUtil = 0.88;
+            }
+        }
     }
 
     function updateCalculatorSliders() {
@@ -3302,16 +3801,71 @@
     }
 
     function syncMainToCalculator() {
-        // Sync parameters from form inputs to calculator inputs
         const util = document.getElementById('cfg-gpu-memory-utilization').value;
         if (util && document.getElementById('calc-gpu-util')) {
             document.getElementById('calc-gpu-util').value = util;
+            document.getElementById('gpu-val').innerText = util;
         }
         const dtype = document.getElementById('cfg-kv-cache-dtype').value;
         if (dtype && document.getElementById('calc-precision')) {
             document.getElementById('calc-precision').value = dtype;
         }
+        
+        // Speculative Mode
+        const specMode = document.getElementById('cfg-speculative-mode').value;
+        window.speculativeMode = specMode;
+        
+        // Main model resolver
+        const mainModel = document.getElementById('cfg-model').value.trim();
+        if (mainModel && window.lastResolvedMainModel !== mainModel) {
+            window.lastResolvedMainModel = mainModel;
+            fetch(`/api/models/resolve?model_path=${encodeURIComponent(mainModel)}`)
+                .then(res => res.json())
+                .then(resolved => {
+                    if (resolved.layers) document.getElementById('calc-layers').value = resolved.layers;
+                    if (resolved.kv_heads) document.getElementById('calc-kv-heads').value = resolved.kv_heads;
+                    if (resolved.head_dim) document.getElementById('calc-head-dim').value = resolved.head_dim;
+                    if (resolved.weight_size_gb) document.getElementById('calc-weight-size').value = resolved.weight_size_gb;
+                    recalculateContext();
+                })
+                .catch(err => console.error("Error resolving main model:", err));
+        }
+
+        // Draft model resolver
+        const draftModel = document.getElementById('cfg-speculative-model').value.trim();
+        if (specMode === 'draft_model' && draftModel && window.lastResolvedDraftModel !== draftModel) {
+            window.lastResolvedDraftModel = draftModel;
+            fetch(`/api/models/resolve?model_path=${encodeURIComponent(draftModel)}`)
+                .then(res => res.json())
+                .then(resolved => {
+                    window.draftWeightSize = resolved.weight_size_gb || 0.0;
+                    window.draftName = resolved.name || 'None';
+                    recalculateContext();
+                })
+                .catch(err => console.error("Error resolving draft model:", err));
+        } else if (specMode !== 'draft_model') {
+            window.draftWeightSize = 0.0;
+            window.draftName = 'None';
+            window.lastResolvedDraftModel = '';
+        }
+        
         recalculateContext();
+    }
+
+    function applySafeUtilization() {
+        if (window.recommendedSafeUtil !== undefined) {
+            const utilInput = document.getElementById('cfg-gpu-memory-utilization');
+            if (utilInput) {
+                utilInput.value = window.recommendedSafeUtil;
+                document.getElementById('gpu-val').innerText = window.recommendedSafeUtil;
+            }
+            const calcInput = document.getElementById('calc-gpu-util');
+            if (calcInput) {
+                calcInput.value = window.recommendedSafeUtil;
+            }
+            recalculateContext();
+            showToast(`Applied recommended GPU Memory Utilization: ${window.recommendedSafeUtil}`, 'success');
+        }
     }
 
     function applyCalculatorValues(type) {
@@ -3827,6 +4381,26 @@ main();`;
         });
     }
 
+    function toggleBenchmarkFields() {
+        const type = document.getElementById('bench-type').value;
+        const fixedGroup = document.getElementById('fixed-concurrency-group');
+        const inputLabel = document.getElementById('bench-concurrency-label');
+        const inputDesc = document.getElementById('bench-concurrency-desc');
+        const inputEl = document.getElementById('bench-concurrency');
+
+        if (type === "temperature") {
+            fixedGroup.style.display = 'block';
+            inputLabel.innerHTML = 'Temperature Levels';
+            inputDesc.innerHTML = 'Comma-separated list (e.g. 0.0,0.3,0.7,1.0)';
+            inputEl.value = '0.0,0.3,0.7,1.0';
+        } else {
+            fixedGroup.style.display = 'none';
+            inputLabel.innerHTML = 'Concurrency Levels';
+            inputDesc.innerHTML = 'Comma-separated list (e.g. 1,2,4,8,16,32)';
+            inputEl.value = '1,2,4,8,16,32';
+        }
+    }
+
     function startBenchmarkRun(event) {
         event.preventDefault();
         const model = document.getElementById('bench-model').value;
@@ -3835,24 +4409,27 @@ main();`;
             return;
         }
 
-        const concurrency = document.getElementById('bench-concurrency').value.trim();
+        const type = document.getElementById('bench-type').value;
+        const sweepValues = document.getElementById('bench-concurrency').value.trim();
         const tokens = document.getElementById('bench-tokens').value;
         const prompt = document.getElementById('bench-prompt').value;
+        const fixedConcurrency = document.getElementById('bench-fixed-concurrency').value;
 
         document.getElementById('bench-log-console').innerText = 'Initializing benchmark...\n';
         document.getElementById('btn-bench-start').disabled = true;
         document.getElementById('btn-bench-stop').disabled = false;
         
-        // Reset progress bar
+        // Reset progress bar & diagnostics
         document.getElementById('bench-progress-percentage').innerText = '0%';
         document.getElementById('bench-bar-fill').style.width = '0%';
         document.getElementById('bench-current-step').innerText = 'Starting...';
+        document.getElementById('bench-diagnostic-card').style.display = 'none';
 
         // Clear Table
         const tbody = document.getElementById('bench-results-tbody');
         tbody.innerHTML = `
             <tr>
-                <td colspan="4" style="padding: 15px 8px; text-align: center; color: var(--text-muted);">Running benchmark... results will appear here.</td>
+                <td colspan="5" style="padding: 15px 8px; text-align: center; color: var(--text-muted);">Running benchmark... results will appear here.</td>
             </tr>
         `;
 
@@ -3865,7 +4442,9 @@ main();`;
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                concurrency_levels: concurrency,
+                benchmark_type: type,
+                sweep_values: sweepValues,
+                fixed_concurrency: parseInt(fixedConcurrency),
                 model: model,
                 prompt: prompt,
                 max_tokens: parseInt(tokens)
@@ -3909,9 +4488,19 @@ main();`;
             document.getElementById('bench-bar-fill').style.width = `${data.progress || 0}%`;
             
             if (data.status === "running") {
-                document.getElementById('bench-current-step').innerText = `Current Step: Concurrency Level = ${data.current_concurrency}`;
+                document.getElementById('bench-current-step').innerText = `Current Step: ${data.current_concurrency}`;
             } else {
                 document.getElementById('bench-current-step').innerText = `Status: ${data.status.toUpperCase()}`;
+            }
+
+            // Dynamically change table header
+            const headerMetric = document.getElementById('bench-table-header-metric');
+            if (headerMetric) {
+                if (data.benchmark_type === "temperature") {
+                    headerMetric.innerText = "Temperature";
+                } else {
+                    headerMetric.innerText = "Concurrency";
+                }
             }
 
             // Update results table & charts
@@ -3924,18 +4513,22 @@ main();`;
                 const latencyData = [];
 
                 data.results.forEach(res => {
+                    const acceptanceRateVal = res.acceptance_rate !== null && res.acceptance_rate !== undefined ? `${res.acceptance_rate}%` : 'N/A';
                     const successRate = `${Math.round((res.completed / res.concurrency) * 100)}%`;
+                    const sweptDisplay = data.benchmark_type === "temperature" ? parseFloat(res.value).toFixed(2) : res.value;
+                    
                     const row = document.createElement('tr');
                     row.style.borderBottom = '1px solid var(--border-color)';
                     row.innerHTML = `
-                        <td style="padding: 10px 8px; font-weight: 500;">${res.concurrency}</td>
+                        <td style="padding: 10px 8px; font-weight: 500;">${sweptDisplay}</td>
                         <td style="padding: 10px 8px; font-family: var(--font-mono); color: var(--accent-cyan);">${res.throughput}</td>
                         <td style="padding: 10px 8px; font-family: var(--font-mono); color: var(--accent-purple);">${res.latency}s</td>
+                        <td style="padding: 10px 8px; font-family: var(--font-mono); color: var(--accent-orange);">${acceptanceRateVal}</td>
                         <td style="padding: 10px 8px;">${successRate} <span style="font-size: 11px; color: var(--text-muted);">(${res.completed}/${res.concurrency})</span></td>
                     `;
                     tbody.appendChild(row);
 
-                    labels.push(res.concurrency);
+                    labels.push(sweptDisplay);
                     throughputData.push(res.throughput);
                     latencyData.push(res.latency);
                 });
@@ -3944,11 +4537,13 @@ main();`;
                 if (benchThroughputChart) {
                     benchThroughputChart.data.labels = labels;
                     benchThroughputChart.data.datasets[0].data = throughputData;
+                    benchThroughputChart.data.datasets[0].label = data.benchmark_type === "temperature" ? "Throughput vs Temp" : "Throughput vs Concurrency";
                     benchThroughputChart.update();
                 }
                 if (benchLatencyChart) {
                     benchLatencyChart.data.labels = labels;
                     benchLatencyChart.data.datasets[0].data = latencyData;
+                    benchLatencyChart.data.datasets[0].label = data.benchmark_type === "temperature" ? "Latency vs Temp" : "Latency vs Concurrency";
                     benchLatencyChart.update();
                 }
             }
@@ -3966,6 +4561,7 @@ main();`;
                 
                 if (finalStatus === "completed") {
                     showToast("Benchmark completed successfully!", "success");
+                    runBenchmarkDiagnostics(data);
                 } else if (finalStatus === "stopped") {
                     showToast("Benchmark stopped.", "info");
                 } else {
@@ -3974,6 +4570,125 @@ main();`;
             }
         })
         .catch(err => console.error("Error polling benchmark status:", err));
+    }
+
+    function runBenchmarkDiagnostics(data) {
+        const diagCard = document.getElementById('bench-diagnostic-card');
+        const diagContent = document.getElementById('bench-diagnostic-content');
+        if (!diagCard || !diagContent) return;
+
+        if (!data.results || data.results.length === 0) {
+            diagCard.style.display = 'none';
+            return;
+        }
+
+        diagCard.style.display = 'block';
+        diagContent.innerHTML = '';
+
+        let html = '';
+
+        // Check for spillover: if any run has throughput < 15 tok/s
+        const lowThroughputRuns = data.results.filter(r => r.throughput > 0 && r.throughput < 15.0);
+        const hasSpillover = lowThroughputRuns.length > 0;
+
+        // Check speculative acceptance rate
+        const specRuns = data.results.filter(r => r.acceptance_rate !== null);
+        let specAdvice = '';
+        if (specRuns.length > 0) {
+            const avgAcceptance = specRuns.reduce((sum, r) => sum + r.acceptance_rate, 0) / specRuns.length;
+            
+            if (avgAcceptance < 50) {
+                specAdvice = `
+                    <div style="background: rgba(255, 150, 0, 0.05); border-left: 3px solid var(--accent-orange); padding: 12px 14px; border-radius: var(--radius-sm);">
+                        <strong style="color: var(--accent-orange); font-size: 14px;">⚠️ Low Speculative Acceptance Rate (${avgAcceptance.toFixed(1)}%)</strong><br>
+                        <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Your draft model is accepting less than 50% of speculative tokens. This indicates draft model predictions diverge significantly from the base model, which degrades efficiency.
+                        </span>
+                        <strong style="font-size: 12px; display: block; margin-top: 8px;">Suggestions:</strong>
+                        <ul style="margin: 4px 0 0 16px; padding: 0; font-size: 12px;">
+                            <li>Lower the sampling <strong>temperature</strong> (closer to 0.0) to make generation more deterministic.</li>
+                            <li>Use a higher quality or more closely fine-tuned/distilled draft model.</li>
+                            <li>Reduce the number of speculative tokens (e.g., set to 3 instead of 5) in Memory config.</li>
+                        </ul>
+                    </div>
+                `;
+            } else if (avgAcceptance >= 75) {
+                specAdvice = `
+                    <div style="background: rgba(0, 240, 255, 0.05); border-left: 3px solid var(--accent-cyan); padding: 12px 14px; border-radius: var(--radius-sm);">
+                        <strong style="color: var(--accent-cyan); font-size: 14px;">🔥 Excellent Speculative Acceptance Rate (${avgAcceptance.toFixed(1)}%)</strong><br>
+                        <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Your speculative decoding configuration is highly efficient! The draft model matches the base model ${avgAcceptance.toFixed(1)}% of the time, resulting in optimal speedups.
+                        </span>
+                    </div>
+                `;
+            } else {
+                specAdvice = `
+                    <div style="background: rgba(150, 0, 255, 0.05); border-left: 3px solid var(--accent-purple); padding: 12px 14px; border-radius: var(--radius-sm);">
+                        <strong style="color: var(--accent-purple); font-size: 14px;">ℹ️ Moderate Speculative Acceptance Rate (${avgAcceptance.toFixed(1)}%)</strong><br>
+                        <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Your draft model is achieving a decent acceptance rate of ${avgAcceptance.toFixed(1)}%. It is speeding up generation, but fine-tuning parameters could improve it further.
+                        </span>
+                    </div>
+                `;
+            }
+        } else {
+            specAdvice = `
+                <div style="background: rgba(255,255,255,0.02); border-left: 3px solid var(--text-muted); padding: 12px 14px; border-radius: var(--radius-sm);">
+                    <strong style="color: var(--text-muted); font-size: 14px;">💡 Speculative Decoding Disabled</strong><br>
+                    <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                        No speculative metrics were recorded. Consider configuring a speculative draft model or Medusa/EAGLE head in the <strong>Memory Configuration</strong> panel to increase throughput by up to 2x.
+                    </span>
+                </div>
+            `;
+        }
+
+        let performanceAdvice = '';
+        if (hasSpillover) {
+            const minTP = Math.min(...lowThroughputRuns.map(r => r.throughput));
+            performanceAdvice = `
+                <div style="background: rgba(255, 0, 0, 0.05); border-left: 3px solid var(--accent-red); padding: 12px 14px; border-radius: var(--radius-sm);">
+                    <strong style="color: var(--accent-red); font-size: 14px;">🚨 Host RAM Swap (Spillover) Detected!</strong><br>
+                    <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                        Throughput dropped below 15 tokens/s (lowest at ${minTP.toFixed(2)} tok/s). On Windows systems, WDDM swaps active GPU pages to Host RAM when VRAM limits are exceeded, severely degrading speed.
+                    </span>
+                    <strong style="font-size: 12px; display: block; margin-top: 8px;">Required Actions:</strong>
+                    <ul style="margin: 4px 0 0 16px; padding: 0; font-size: 12px;">
+                        <li>Reduce <strong>gpu-memory-utilization</strong> in the Memory panel (e.g. to 0.70 or 0.75).</li>
+                        <li>Decrease <strong>max-model-len</strong> (e.g. to 2048 or 1024) to shrink the physical KV cache size.</li>
+                    </ul>
+                </div>
+            `;
+        } else {
+            const sortedByTP = [...data.results].sort((a,b) => b.throughput - a.throughput);
+            const peakRun = sortedByTP[0];
+            
+            if (data.benchmark_type === "temperature") {
+                performanceAdvice = `
+                    <div style="background: rgba(0, 240, 255, 0.05); border-left: 3px solid var(--accent-cyan); padding: 12px 14px; border-radius: var(--radius-sm);">
+                        <strong style="color: var(--accent-cyan); font-size: 14px;">⚡ Performance Profile</strong><br>
+                        <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Peak throughput reached <strong>${peakRun.throughput.toFixed(2)} tokens/s</strong> at temperature <strong>${parseFloat(peakRun.value).toFixed(2)}</strong>.<br>
+                            Performance remains stable. No host RAM spillover was detected during this run.
+                        </span>
+                    </div>
+                `;
+            } else {
+                const stableConcurrencyRuns = data.results.filter(r => r.latency < 2.5);
+                const maxStableConc = stableConcurrencyRuns.length > 0 ? Math.max(...stableConcurrencyRuns.map(r=>r.concurrency)) : 1;
+                performanceAdvice = `
+                    <div style="background: rgba(0, 240, 255, 0.05); border-left: 3px solid var(--accent-cyan); padding: 12px 14px; border-radius: var(--radius-sm);">
+                        <strong style="color: var(--accent-cyan); font-size: 14px;">⚡ Concurrency Suggestions</strong><br>
+                        <span style="font-size: 12px; color: var(--text-secondary); display: block; margin-top: 4px;">
+                            Peak throughput of <strong>${peakRun.throughput.toFixed(2)} tokens/s</strong> achieved at concurrency level <strong>${peakRun.concurrency}</strong>.<br>
+                            The maximum stable concurrency where average latency remains below 2.5s is <strong>${maxStableConc} concurrent clients</strong>.
+                            Size your API client pools around this value for optimal latency.
+                        </span>
+                    </div>
+                `;
+            }
+        }
+
+        diagContent.innerHTML = specAdvice + performanceAdvice;
     }
 
     function stopBenchmarkRun() {

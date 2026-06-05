@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  vllm-ui:
+    build: .
+    container_name: vllm-ui
+    ports:
+      - "8888:8888"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/app
+      - ./models:/models
+      - ./vllm-cache:/vllm-cache
+      - ./repos:/repos
+    environment:
+      - VLLM_API_URL=http://vllm-server:8000
+      - VLLM_CONTAINER_NAME=vllm-server
+      - HF_HUB_DISABLE_SYMLINKS=1
+    restart: unless-stopped
+    depends_on:
+      - vllm-server
+
+  vllm-server:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models
+      - ./vllm-cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_HUB_DISABLE_SYMLINKS=1
+    entrypoint: ["/bin/sh", "/models/run_vllm.sh"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: "no"

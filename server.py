@@ -50,6 +50,7 @@ active_git_operations: Dict[str, Dict[str, Any]] = {}
 active_benchmarks: Dict[str, Dict[str, Any]] = {}
 active_tunings: Dict[str, Dict[str, Any]] = {}
 active_verifications: Dict[str, Dict[str, Any]] = {}
+active_restarts: Dict[str, Dict[str, Any]] = {}
 
 # Global variable to cache the parsed KV cache capacity (parsed from logs)
 cached_kv_cache_capacity: Optional[int] = None
@@ -468,8 +469,9 @@ def get_gpu_total_vram() -> int:
         if container.status == "running":
             res = container.exec_run("nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits")
             if res.exit_code == 0:
-                out = res.output.decode('utf-8').strip()
-                return int(out)
+                lines = [line.strip() for line in res.output.decode('utf-8').strip().split('\n') if line.strip()]
+                if lines:
+                    return int(lines[0])
     except Exception as e:
         logger.error(f"Failed to get container VRAM: {e}")
         
@@ -479,7 +481,9 @@ def get_gpu_total_vram() -> int:
             shell=True, capture_output=True, text=True
         )
         if res.returncode == 0:
-            return int(res.stdout.strip())
+            lines = [line.strip() for line in res.stdout.strip().split('\n') if line.strip()]
+            if lines:
+                return int(lines[0])
     except Exception as e:
         logger.error(f"Failed to get local VRAM: {e}")
         
@@ -828,16 +832,92 @@ def tune_gpu_memory_task(tuning_id: str, target_concurrency: int):
         
     state["logs"] += f"Testing model: {model}\n"
     
-    # Binary Search on range [0.70, 0.95]
+    # Binary Search range pre-calculation and safeguards
     stable_value = None
     baseline_speed = 0.0
     original_util = args.get("gpu-memory-utilization")
     
+    # Calculate limits based on base and draft model sizes
+    vram_total_mb = get_gpu_total_vram()
+    vram_total_gb = vram_total_mb / 1024.0
+    resolved_base = resolve_model_config_and_size(model)
+    
+    # Detect speculative decoding configuration
+    speculative_mode = "disabled"
+    draft_model_path = None
+    draft_weight_size_gb = 0.0
+    draft_name = "None"
+    
+    spec_config_str = args.get("speculative-config")
+    spec_model_arg = args.get("speculative-model")
+    
+    if spec_config_str:
+        try:
+            clean = spec_config_str.strip()
+            if clean.startswith("'") and clean.endswith("'"):
+                clean = clean[1:-1]
+            spec_cfg = json.loads(clean)
+            draft_model_path = spec_cfg.get("model")
+            if draft_model_path == "[draft]":
+                speculative_mode = "mtp_head"
+            elif draft_model_path:
+                speculative_mode = "draft_model"
+        except Exception:
+            draft_model_path = spec_config_str
+            if draft_model_path == "[draft]":
+                speculative_mode = "mtp_head"
+            elif draft_model_path:
+                speculative_mode = "draft_model"
+    elif spec_model_arg:
+        draft_model_path = spec_model_arg
+        if draft_model_path == "[draft]":
+            speculative_mode = "mtp_head"
+        elif draft_model_path:
+            speculative_mode = "draft_model"
+            
+    if speculative_mode == "draft_model" and draft_model_path:
+        resolved_draft = resolve_model_config_and_size(draft_model_path)
+        draft_weight_size_gb = resolved_draft.get("weight_size_gb", 0.0)
+        draft_name = resolved_draft.get("name", "None")
+        
+    tp = 1
+    try:
+        tp_val = args.get("tensor-parallel-size")
+        if tp_val:
+            tp = int(tp_val)
+    except Exception:
+        pass
+
+    base_weight_gb = resolved_base.get("weight_size_gb", 4.0)
+    base_weight_gb_scaled = base_weight_gb / tp
+    draft_weight_size_gb_scaled = draft_weight_size_gb / tp
+
+    u_max = 0.95
+    if speculative_mode == "draft_model" and draft_weight_size_gb > 0:
+        u_max = 1.0 - (draft_weight_size_gb_scaled + 0.5) / vram_total_gb
+        u_max = round(u_max, 2)
+        u_max = min(0.95, max(0.50, u_max))
+        state["logs"] += f"[Auto-Tuner] Pre-calculated maximum safe utilization: {u_max:.2f} for draft model '{draft_name}' ({draft_weight_size_gb:.2f} GB total, sharded to {draft_weight_size_gb_scaled:.2f} GB per GPU).\n"
+        
+    u_min = (base_weight_gb_scaled + 0.8) / vram_total_gb
+    u_min = round(u_min, 2)
+    
+    if speculative_mode == "draft_model" and draft_weight_size_gb > 0 and u_min > u_max:
+        state["status"] = "failed"
+        state["error"] = f"Infeasible configuration: base model + draft model exceeds GPU VRAM limits."
+        state["logs"] += f"\n[Fatal Error] Infeasible configuration for your GPU hardware!\n"
+        state["logs"] += f"  Base model weights + overhead require at least {u_min:.2f} utilization ({base_weight_gb_scaled + 0.8:.2f} GB per GPU).\n"
+        state["logs"] += f"  Draft model weights + overhead require at least {draft_weight_size_gb_scaled + 0.5:.2f} GB headroom (restricting utilization to {u_max:.2f}).\n"
+        state["logs"] += f"  Since Min Util ({u_min:.2f}) > Max Util ({u_max:.2f}), they cannot run together.\n"
+        return
+        
     client = docker.from_env()
     
     try:
-        # 1. Establish baseline first: try 0.70, 0.75, 0.80, 0.85 to find first bootable configuration
-        baseline_candidates = [0.70, 0.75, 0.80, 0.85]
+        # 1. Establish baseline first: try values <= u_max to find first bootable configuration
+        baseline_candidates = [c for c in [0.70, 0.75, 0.80, 0.85] if c <= u_max]
+        if not baseline_candidates:
+            baseline_candidates = [u_max]
         baseline_val = None
         
         for candidate in baseline_candidates:
@@ -990,9 +1070,9 @@ def tune_gpu_memory_task(tuning_id: str, target_concurrency: int):
             state["error"] = "Failed to establish working memory baseline"
             return
             
-        # 2. Binary Search on [baseline_val + 0.01, 0.95]
+        # 2. Binary Search on [baseline_val + 0.01, u_max]
         low = round(baseline_val + 0.01, 2)
-        high = 0.95
+        high = u_max
         step_count = 1
         max_steps = 6
         MAX_BOOT_ATTEMPTS = 3
@@ -1214,6 +1294,11 @@ def tune_gpu_memory_task(tuning_id: str, target_concurrency: int):
             except Exception:
                 pass
 
+# API: Resolve Model Configuration and Size
+@app.get("/api/models/resolve")
+def resolve_model_size(model_path: str):
+    return resolve_model_config_and_size(model_path)
+
 # API: Context Capacity GET
 @app.get("/api/config/context_capacity")
 def get_context_capacity():
@@ -1223,6 +1308,54 @@ def get_context_capacity():
     gpu_util = args.get("gpu-memory-utilization", 0.88)
     vram_total_mb = get_gpu_total_vram()
     
+    # 1. Detect speculative decoding configuration
+    speculative_mode = "disabled"
+    draft_model_path = None
+    draft_weight_size_gb = 0.0
+    draft_layers = 0
+    draft_kv_heads = 0
+    draft_head_dim = 0
+    draft_type = "None"
+    draft_name = "None"
+    draft_config_found = False
+
+    spec_config_str = args.get("speculative-config")
+    spec_model_arg = args.get("speculative-model")
+    
+    if spec_config_str:
+        try:
+            clean = spec_config_str.strip()
+            if clean.startswith("'") and clean.endswith("'"):
+                clean = clean[1:-1]
+            spec_cfg = json.loads(clean)
+            draft_model_path = spec_cfg.get("model")
+            if draft_model_path == "[draft]":
+                speculative_mode = "mtp_head"
+            elif draft_model_path:
+                speculative_mode = "draft_model"
+        except Exception:
+            draft_model_path = spec_config_str
+            if draft_model_path == "[draft]":
+                speculative_mode = "mtp_head"
+            elif draft_model_path:
+                speculative_mode = "draft_model"
+    elif spec_model_arg:
+        draft_model_path = spec_model_arg
+        if draft_model_path == "[draft]":
+            speculative_mode = "mtp_head"
+        elif draft_model_path:
+            speculative_mode = "draft_model"
+
+    if speculative_mode == "draft_model" and draft_model_path:
+        resolved_draft = resolve_model_config_and_size(draft_model_path)
+        draft_weight_size_gb = resolved_draft.get("weight_size_gb", 0.0)
+        draft_layers = resolved_draft.get("layers", 0)
+        draft_kv_heads = resolved_draft.get("kv_heads", 0)
+        draft_head_dim = resolved_draft.get("head_dim", 0)
+        draft_type = resolved_draft.get("type", "None")
+        draft_name = resolved_draft.get("name", "None")
+        draft_config_found = resolved_draft.get("config_found", False)
+        
     if not model_path:
         return {
             "model_path": None,
@@ -1234,7 +1367,16 @@ def get_context_capacity():
             "weight_size_gb": 4.0,
             "type": "Unknown",
             "name": "None",
-            "config_found": False
+            "config_found": False,
+            "speculative_mode": speculative_mode,
+            "draft_model_path": draft_model_path,
+            "draft_weight_size_gb": draft_weight_size_gb,
+            "draft_layers": draft_layers,
+            "draft_kv_heads": draft_kv_heads,
+            "draft_head_dim": draft_head_dim,
+            "draft_type": draft_type,
+            "draft_name": draft_name,
+            "draft_config_found": draft_config_found
         }
         
     resolved = resolve_model_config_and_size(model_path)
@@ -1242,7 +1384,22 @@ def get_context_capacity():
         "model_path": model_path,
         "gpu_memory_utilization": gpu_util,
         "vram_total_mb": vram_total_mb,
-        **resolved
+        "layers": resolved.get("layers"),
+        "kv_heads": resolved.get("kv_heads"),
+        "head_dim": resolved.get("head_dim"),
+        "weight_size_gb": resolved.get("weight_size_gb"),
+        "type": resolved.get("type"),
+        "name": resolved.get("name"),
+        "config_found": resolved.get("config_found"),
+        "speculative_mode": speculative_mode,
+        "draft_model_path": draft_model_path,
+        "draft_weight_size_gb": draft_weight_size_gb,
+        "draft_layers": draft_layers,
+        "draft_kv_heads": draft_kv_heads,
+        "draft_head_dim": draft_head_dim,
+        "draft_type": draft_type,
+        "draft_name": draft_name,
+        "draft_config_found": draft_config_found
     }
 
 # API: Verify Context Capacity
@@ -1790,75 +1947,240 @@ def delete_model(payload: Dict[str, Any]):
         logger.error(f"Failed to delete model: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def get_model_cache_size(repo_id: str) -> int:
+    clean_repo = repo_id.replace("/", "--")
+    paths = [
+        f"/vllm-cache/models--{clean_repo}",
+        f"/vllm-cache/hub/models--{clean_repo}"
+    ]
+    total_size = 0
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                for root, _, files in os.walk(p):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        try:
+                            if os.path.exists(fp):
+                                total_size += os.path.getsize(fp)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    return total_size
+
+def cleanup_model_locks(repo_id: str):
+    clean_repo = repo_id.replace("/", "--")
+    paths = [
+        f"/vllm-cache/.locks/models--{clean_repo}",
+        f"/vllm-cache/hub/.locks/models--{clean_repo}"
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                for root, _, files in os.walk(p):
+                    for f in files:
+                        if f.endswith(".lock"):
+                            fp = os.path.join(root, f)
+                            try:
+                                os.remove(fp)
+                                logger.info(f"Removed stale lock file: {fp}")
+                            except Exception as e:
+                                logger.warning(f"Failed to remove stale lock file {fp}: {e}")
+            except Exception as e:
+                logger.warning(f"Error cleaning locks directory {p}: {e}")
+
 # Background HF Download Task
-def download_hf_model_task(repo_id: str, filename: Optional[str] = None):
-    try:
-        active_downloads[repo_id] = {
-            "status": "downloading",
-            "progress": 0,
-            "speed": "N/A",
-            "eta": "N/A",
-            "logs": "",
-            "error": None
-        }
-        
-        cmd = ["hf", "download", "--cache-dir", "/vllm-cache", repo_id]
-        if filename:
-            cmd.append(filename)
-            
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        
-        # Read stdout line by line to extract progress
-        while True:
-            line = process.stdout.readline()
-            if not line:
-                break
-                
-            active_downloads[repo_id]["logs"] += line
-            if len(active_downloads[repo_id]["logs"]) > 20000:
-                active_downloads[repo_id]["logs"] = active_downloads[repo_id]["logs"][-20000:]
-                
-            # Parse progress: look for percentage or tqdm bars
-            # Example: "Downloading:  45%|████     | 1.2G/2.5G [00:12<00:15, 80MB/s]"
-            match = re.search(r"(\d+)%", line)
-            if match:
-                active_downloads[repo_id]["progress"] = int(match.group(1))
-                
-            # Regex to match tqdm progress statistics
-            tqdm_match = re.search(r"(\d+)%\|.*\|.*\[(.*)<(.*),\s*([^\]]+)\]", line)
-            if tqdm_match:
-                active_downloads[repo_id]["eta"] = tqdm_match.group(3).strip()
-                active_downloads[repo_id]["speed"] = tqdm_match.group(4).strip()
-                
-        rc = process.wait()
-        if rc == 0:
-            active_downloads[repo_id]["status"] = "completed"
-            active_downloads[repo_id]["progress"] = 100
-        else:
-            active_downloads[repo_id]["status"] = "failed"
-            active_downloads[repo_id]["error"] = f"CLI download exited with status code {rc}"
-            
-    except Exception as e:
-        logger.error(f"Download thread failed: {e}")
-        active_downloads[repo_id] = {
-            "status": "failed",
-            "progress": 0,
-            "speed": "N/A",
-            "eta": "N/A",
-            "logs": str(e),
-            "error": str(e)
-        }
+def download_hf_model_task(
+    repo_id: str,
+    filename: Optional[str] = None,
+    token: Optional[str] = None,
+    use_mirror: bool = False,
+    enable_transfer: bool = False,
+    max_retries: int = 5,
+    inactivity_timeout: int = 1200
+):
+    import queue
+    import threading
+
+    active_downloads[repo_id] = {
+        "status": "downloading",
+        "progress": 0,
+        "speed": "N/A",
+        "eta": "N/A",
+        "logs": f"Initializing download for {repo_id}...\n",
+        "error": None
+    }
+
+    env = os.environ.copy()
+    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    env["HF_HUB_HTTP_TIMEOUT"] = "30"
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["HF_HUB_DISABLE_SYMLINKS"] = "1"
+    if use_mirror:
+        env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        active_downloads[repo_id]["logs"] += "Mirror enabled: Using https://hf-mirror.com\n"
+    if token:
+        env["HF_TOKEN"] = token
+        # Mask the token for safety in the logs
+        masked_token = token[:5] + "..." + token[-4:] if len(token) > 9 else "..."
+        active_downloads[repo_id]["logs"] += f"Auth token configured: {masked_token}\n"
+    if enable_transfer:
+        env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        active_downloads[repo_id]["logs"] += "High-Speed transfer mode enabled (hf-transfer)\n"
+
+    cmd = ["hf", "download", "--cache-dir", "/vllm-cache", repo_id]
+    if filename:
+        cmd.append(filename)
+    if token:
+        cmd.extend(["--token", token])
+
+    for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            active_downloads[repo_id]["logs"] += f"\n--- RETRY ATTEMPT {attempt}/{max_retries} ---\n"
+            active_downloads[repo_id]["speed"] = "Retrying"
+            active_downloads[repo_id]["eta"] = "N/A"
+            logger.info(f"Retrying download for {repo_id} (Attempt {attempt}/{max_retries})")
+
+        try:
+            # Note: We do NOT run cleanup_model_locks here to avoid deleting active lock files
+            # from parallel or concurrent downloads that other tasks/runs might be waiting for.
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env
+            )
+
+            q = queue.Queue()
+            def reader():
+                try:
+                    buffer = []
+                    while True:
+                        char = process.stdout.read(1)
+                        if not char:
+                            if buffer:
+                                q.put("".join(buffer))
+                            break
+                        buffer.append(char)
+                        if char in ('\n', '\r'):
+                            q.put("".join(buffer))
+                            buffer = []
+                except Exception as ex:
+                    q.put(f"[Reader Exception] {ex}\n")
+                finally:
+                    process.stdout.close()
+                    q.put(None) # EOF marker
+
+            t = threading.Thread(target=reader, daemon=True)
+            t.start()
+
+            timeout_occurred = False
+            last_cache_size = get_model_cache_size(repo_id)
+            while True:
+                try:
+                    line = q.get(timeout=float(inactivity_timeout))
+                    if line is None:
+                        # EOF reached
+                        break
+                    
+                    active_downloads[repo_id]["logs"] += line
+                    # Limit log buffer size
+                    if len(active_downloads[repo_id]["logs"]) > 30000:
+                        active_downloads[repo_id]["logs"] = active_downloads[repo_id]["logs"][-30000:]
+
+                    # Parse progress & stats if not in hf-transfer mode
+                    if not enable_transfer:
+                        # Percentage
+                        match = re.search(r"(\d+)%", line)
+                        if match:
+                            active_downloads[repo_id]["progress"] = int(match.group(1))
+
+                        # tqdm stats
+                        tqdm_match = re.search(r"(\d+)%\|.*\|.*\[(.*)<(.*),\s*([^\]]+)\]", line)
+                        if tqdm_match:
+                            active_downloads[repo_id]["eta"] = tqdm_match.group(3).strip()
+                            active_downloads[repo_id]["speed"] = tqdm_match.group(4).strip()
+                    else:
+                        # In hf-transfer mode, we can parse speed from log output if it's there
+                        active_downloads[repo_id]["progress"] = 50  # intermediate progress placeholder
+                        active_downloads[repo_id]["speed"] = "High-speed"
+                        active_downloads[repo_id]["eta"] = "N/A"
+
+                except queue.Empty:
+                    # Inactivity timeout! Check if cache size grew
+                    current_cache_size = get_model_cache_size(repo_id)
+                    if current_cache_size > last_cache_size:
+                        diff_mb = (current_cache_size - last_cache_size) / (1024 * 1024)
+                        active_downloads[repo_id]["logs"] += f"\n[Info] No output for {inactivity_timeout}s, but cache size grew by {diff_mb:.2f} MB. Continuing download...\n"
+                        logger.info(f"Download for {repo_id} silent but active: grew by {diff_mb:.2f} MB")
+                        last_cache_size = current_cache_size
+                        continue
+                    else:
+                        timeout_occurred = True
+                        active_downloads[repo_id]["logs"] += f"\n[Warning] Inactivity timeout of {inactivity_timeout}s reached (no logs and no file size growth). Terminating download process...\n"
+                        logger.warning(f"Download for {repo_id} timed out after {inactivity_timeout}s of inactivity. Terminating...")
+                        
+                        process.terminate()
+                        time.sleep(2)
+                        if process.poll() is None:
+                            process.kill()
+                        break
+
+            rc = process.wait()
+
+            if timeout_occurred:
+                if attempt < max_retries:
+                    active_downloads[repo_id]["logs"] += "Waiting 5 seconds before retrying due to timeout...\n"
+                    time.sleep(5)
+                    continue
+                else:
+                    active_downloads[repo_id]["status"] = "failed"
+                    active_downloads[repo_id]["error"] = f"Download stuck and timed out after {max_retries} attempts."
+                    return
+
+            if rc == 0:
+                active_downloads[repo_id]["status"] = "completed"
+                active_downloads[repo_id]["progress"] = 100
+                active_downloads[repo_id]["speed"] = "N/A"
+                active_downloads[repo_id]["eta"] = "N/A"
+                active_downloads[repo_id]["logs"] += "\n✓ Download completed successfully!\n"
+                logger.info(f"Download for {repo_id} completed successfully.")
+                return
+            else:
+                active_downloads[repo_id]["logs"] += f"\n[Error] CLI download exited with code {rc}\n"
+                if attempt < max_retries:
+                    active_downloads[repo_id]["logs"] += "Waiting 5 seconds before retrying...\n"
+                    time.sleep(5)
+                    continue
+                else:
+                    active_downloads[repo_id]["status"] = "failed"
+                    active_downloads[repo_id]["error"] = f"CLI download exited with status code {rc} after {max_retries} attempts."
+                    return
+
+        except Exception as e:
+            active_downloads[repo_id]["logs"] += f"\n[Exception] Error during download attempt: {e}\n"
+            logger.error(f"Download attempt failed: {e}")
+            if attempt < max_retries:
+                time.sleep(5)
+                continue
+            else:
+                active_downloads[repo_id]["status"] = "failed"
+                active_downloads[repo_id]["error"] = str(e)
+                return
 
 @app.post("/api/models/download")
 def download_model(payload: Dict[str, Any], background_tasks: BackgroundTasks):
     repo_id = payload.get("repo_id")
     filename = payload.get("filename")
+    token = payload.get("token")
+    use_mirror = payload.get("use_mirror", False)
+    enable_transfer = payload.get("enable_transfer", False)
+    max_retries = int(payload.get("max_retries", 5))
+    inactivity_timeout = int(payload.get("inactivity_timeout", 1200))
     
     if not repo_id:
         raise HTTPException(status_code=400, detail="repo_id is required")
@@ -1875,7 +2197,16 @@ def download_model(payload: Dict[str, Any], background_tasks: BackgroundTasks):
     if repo_id in active_downloads and active_downloads[repo_id]["status"] == "downloading":
         return {"message": "Download already in progress", "repo_id": repo_id}
         
-    background_tasks.add_task(download_hf_model_task, repo_id, filename)
+    background_tasks.add_task(
+        download_hf_model_task,
+        repo_id=repo_id,
+        filename=filename,
+        token=token,
+        use_mirror=use_mirror,
+        enable_transfer=enable_transfer,
+        max_retries=max_retries,
+        inactivity_timeout=inactivity_timeout
+    )
     return {"message": "Download started in background", "repo_id": repo_id}
 
 @app.get("/api/models/download/status")
@@ -1909,7 +2240,8 @@ def load_sampling_params() -> Dict[str, Any]:
         return default_params
 
 # Helper: Send a single request for benchmarking
-async def send_chat_completion_request(client: httpx.AsyncClient, model: str, prompt: str, max_tokens: int) -> Optional[tuple]:
+# Helper: Send a single request for benchmarking
+async def send_chat_completion_request(client: httpx.AsyncClient, model: str, prompt: str, max_tokens: int, temperature: Optional[float] = None) -> Optional[tuple]:
     sampling = load_sampling_params()
     payload = {
         "model": model,
@@ -1919,8 +2251,11 @@ async def send_chat_completion_request(client: httpx.AsyncClient, model: str, pr
     }
     
     # Inject sampling configurations
-    if sampling.get("temperature") is not None:
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
+    elif sampling.get("temperature") is not None:
         payload["temperature"] = float(sampling["temperature"])
+        
     if sampling.get("top_p") is not None:
         payload["top_p"] = float(sampling["top_p"])
     if sampling.get("top_k") is not None and int(sampling["top_k"]) != -1:
@@ -1948,11 +2283,11 @@ async def send_chat_completion_request(client: httpx.AsyncClient, model: str, pr
         return None
 
 # Helper: Run a batch of concurrent requests
-async def run_batch(concurrency: int, model: str, prompt: str, max_tokens: int) -> Dict[str, Any]:
+async def run_batch(concurrency: int, model: str, prompt: str, max_tokens: int, temperature: Optional[float] = None) -> Dict[str, Any]:
     # Set high limits to prevent local socket bottlenecks
     limits = httpx.Limits(max_keepalive_connections=concurrency + 5, max_connections=concurrency + 10)
     async with httpx.AsyncClient(limits=limits) as client:
-        tasks = [send_chat_completion_request(client, model, prompt, max_tokens) for _ in range(concurrency)]
+        tasks = [send_chat_completion_request(client, model, prompt, max_tokens, temperature) for _ in range(concurrency)]
         start_bench = time.perf_counter()
         results = await asyncio.gather(*tasks)
         end_bench = time.perf_counter()
@@ -1975,36 +2310,75 @@ async def run_batch(concurrency: int, model: str, prompt: str, max_tokens: int) 
         "avg_latency": avg_latency
     }
 
+# Helper: Query Speculative Decoding Metrics from Prometheus
+def get_speculative_decoding_metrics() -> Dict[str, float]:
+    try:
+        resp = httpx.get(f"{VLLM_API_URL}/metrics", timeout=1.0)
+        if resp.status_code == 200:
+            text = resp.text
+            accepted_match = re.search(r'vllm:spec_decode_num_accepted_tokens(?:_total)?\s+(\d+\.?\d*)', text)
+            draft_match = re.search(r'vllm:spec_decode_num_draft_tokens(?:_total)?\s+(\d+\.?\d*)', text)
+            
+            accepted = float(accepted_match.group(1)) if accepted_match else 0.0
+            draft = float(draft_match.group(1)) if draft_match else 0.0
+            return {"accepted": accepted, "draft": draft}
+    except Exception:
+        pass
+    return {"accepted": 0.0, "draft": 0.0}
+
 # Task Runner for background thread
-def run_benchmark_task(benchmark_id: str, concurrency_levels: List[int], model: str, prompt: str, max_tokens: int):
+def run_benchmark_task(benchmark_id: str, benchmark_type: str, sweep_values: List[Any], model: str, prompt: str, max_tokens: int, fixed_concurrency: int = 2):
     state = active_benchmarks.get(benchmark_id)
     if not state:
         return
         
     state["status"] = "running"
-    state["logs"] += f"Starting Concurrency Benchmark for model: {model}\n"
-    state["logs"] += f"Target concurrency levels: {concurrency_levels}\n"
+    state["benchmark_type"] = benchmark_type
+    state["logs"] += f"Starting Benchmark (Type: {benchmark_type}) for model: {model}\n"
+    state["logs"] += f"Target sweep levels: {sweep_values}\n"
+    if benchmark_type == "temperature":
+        state["logs"] += f"Fixed Concurrency: {fixed_concurrency}\n"
     state["logs"] += f"Max tokens to generate: {max_tokens}\n"
     state["logs"] += "----------------------------------------------\n"
     
     try:
         results = []
-        for idx, concurrency in enumerate(concurrency_levels):
+        for idx, val in enumerate(sweep_values):
             if state["status"] == "stopping":
                 break
                 
-            state["current_concurrency"] = concurrency
-            state["progress"] = int((idx / len(concurrency_levels)) * 100)
-            
-            log_msg = f"\n--- Testing Concurrency: {concurrency} ---\n"
+            if benchmark_type == "temperature":
+                current_temp = float(val)
+                current_concurrency = fixed_concurrency
+                state["current_concurrency"] = f"Temp={current_temp:.2f}"
+                log_msg = f"\n--- Testing Temperature: {current_temp:.2f} (Concurrency: {fixed_concurrency}) ---\n"
+            else:
+                current_temp = None
+                current_concurrency = int(val)
+                state["current_concurrency"] = f"Conc={current_concurrency}"
+                log_msg = f"\n--- Testing Concurrency: {current_concurrency} ---\n"
+                
+            state["progress"] = int((idx / len(sweep_values)) * 100)
             state["logs"] += log_msg
             logger.info(log_msg.strip())
             
+            # Query speculative metrics before batch
+            metrics_before = get_speculative_decoding_metrics()
+            
             # Execute batch in async loop
-            batch_res = asyncio.run(run_batch(concurrency, model, prompt, max_tokens))
+            batch_res = asyncio.run(run_batch(current_concurrency, model, prompt, max_tokens, current_temp))
             
             if state["status"] == "stopping":
                 break
+                
+            # Query speculative metrics after batch
+            metrics_after = get_speculative_decoding_metrics()
+            accepted_diff = metrics_after["accepted"] - metrics_before["accepted"]
+            draft_diff = metrics_after["draft"] - metrics_before["draft"]
+            
+            acceptance_rate = None
+            if draft_diff > 0:
+                acceptance_rate = round((accepted_diff / draft_diff) * 100.0, 1)
                 
             if batch_res.get("success"):
                 throughput = batch_res["throughput"]
@@ -2013,30 +2387,35 @@ def run_benchmark_task(benchmark_id: str, concurrency_levels: List[int], model: 
                 total_time = batch_res["total_time"]
                 
                 res_entry = {
-                    "concurrency": concurrency,
+                    "concurrency": current_concurrency, # Keep concurrency key for chart compatibility
+                    "value": val,  # The actual swept variable (temperature or concurrency)
                     "throughput": round(throughput, 2),
                     "latency": round(avg_latency, 2),
                     "completed": completed,
-                    "total_time": round(total_time, 2)
+                    "total_time": round(total_time, 2),
+                    "acceptance_rate": acceptance_rate
                 }
                 results.append(res_entry)
                 state["results"] = results
                 
                 success_msg = (
-                    f"Completed {completed}/{concurrency} requests\n"
+                    f"Completed {completed}/{current_concurrency} requests\n"
                     f"Total Time: {total_time:.2f}s\n"
                     f"Aggregate Throughput: {throughput:.2f} tokens/s\n"
                     f"Avg Latency per Agent: {avg_latency:.2f}s\n"
                 )
+                if acceptance_rate is not None:
+                    success_msg += f"Draft Token Acceptance Rate: {acceptance_rate:.1f}%\n"
+                    
                 state["logs"] += success_msg
                 logger.info(success_msg.strip())
             else:
-                err_msg = f"Failed at concurrency {concurrency}: {batch_res.get('error', 'unknown error')}\n"
+                err_msg = f"Failed at value {val}: {batch_res.get('error', 'unknown error')}\n"
                 state["logs"] += err_msg
                 logger.error(err_msg.strip())
                 
             # Settle pause
-            if idx < len(concurrency_levels) - 1:
+            if idx < len(sweep_values) - 1:
                 state["logs"] += "Waiting 3s for cache to settle...\n"
                 for _ in range(30):
                     if state["status"] == "stopping":
@@ -2110,7 +2489,10 @@ def speed_diagnostic():
 # API: Start Benchmark
 @app.post("/api/benchmark/start")
 def start_benchmark(payload: Dict[str, Any], background_tasks: BackgroundTasks):
+    benchmark_type = payload.get("benchmark_type", "concurrency")
     concurrency_levels_str = payload.get("concurrency_levels", "1,2,4,8,16,32")
+    sweep_values_str = payload.get("sweep_values", concurrency_levels_str)
+    fixed_concurrency = int(payload.get("fixed_concurrency", 2))
     model = payload.get("model")
     prompt = payload.get("prompt", "Explain the significance of space exploration in 10 paragraphs.")
     max_tokens = payload.get("max_tokens", 128)
@@ -2119,15 +2501,17 @@ def start_benchmark(payload: Dict[str, Any], background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="model is required")
         
     try:
-        # Parse concurrency levels
-        concurrency_levels = [int(x.strip()) for x in concurrency_levels_str.split(",") if x.strip().isdigit()]
-        # Sort and limit concurrency levels to a reasonable range
-        concurrency_levels = sorted([x for x in concurrency_levels if 1 <= x <= 256])
+        if benchmark_type == "temperature":
+            sweep_values = [float(x.strip()) for x in sweep_values_str.split(",") if x.strip()]
+            sweep_values = sorted([x for x in sweep_values if 0.0 <= x <= 2.5])
+        else:
+            sweep_values = [int(x.strip()) for x in sweep_values_str.split(",") if x.strip().isdigit()]
+            sweep_values = sorted([x for x in sweep_values if 1 <= x <= 256])
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid concurrency_levels format")
+        raise HTTPException(status_code=400, detail="Invalid sweep values format")
         
-    if not concurrency_levels:
-        raise HTTPException(status_code=400, detail="At least one valid concurrency level is required")
+    if not sweep_values:
+        raise HTTPException(status_code=400, detail="At least one valid sweep value is required")
         
     # Generate unique run ID
     run_id = "run_" + str(int(time.time()))
@@ -2140,7 +2524,7 @@ def start_benchmark(payload: Dict[str, Any], background_tasks: BackgroundTasks):
     active_benchmarks[run_id] = {
         "status": "idle",
         "progress": 0,
-        "current_concurrency": 0,
+        "current_concurrency": "",
         "logs": "",
         "results": [],
         "error": None
@@ -2149,10 +2533,12 @@ def start_benchmark(payload: Dict[str, Any], background_tasks: BackgroundTasks):
     background_tasks.add_task(
         run_benchmark_task,
         run_id,
-        concurrency_levels,
+        benchmark_type,
+        sweep_values,
         model,
         prompt,
-        max_tokens
+        max_tokens,
+        fixed_concurrency
     )
     
     return {"message": "Benchmark started in background", "run_id": run_id}
@@ -2337,20 +2723,175 @@ def restore_backup(payload: Dict[str, Any]):
         
     return {"message": "Backup restored successfully. Run restart to apply."}
 
+def safe_restart_container_thread(restart_id: str, container_name: str, run_vllm_path: str):
+    state = active_restarts[restart_id]
+    state["status"] = "running"
+    state["logs"] = "Starting health-monitored container restart...\n"
+    
+    known_good_content = None
+    known_good_backup_path = None
+    
+    # Check if currently healthy
+    client = docker.from_env()
+    try:
+        container = client.containers.get(container_name)
+        health = "offline"
+        try:
+            resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
+            if resp.status_code == 200:
+                health = "healthy"
+        except Exception:
+            pass
+            
+        if health == "healthy" and os.path.exists(run_vllm_path):
+            with open(run_vllm_path, "r", encoding="utf-8") as f:
+                known_good_content = f.read()
+            state["logs"] += "Current configuration is active and healthy. Stored as recovery point.\n"
+    except Exception as e:
+        state["logs"] += f"Could not verify current container health: {e}. Checking filesystem for recent backups...\n"
+
+    # Fallback to latest filesystem backup if container is currently offline
+    if known_good_content is None:
+        models_dir = os.path.dirname(run_vllm_path)
+        if os.path.exists(models_dir):
+            backups = []
+            for entry in os.scandir(models_dir):
+                if entry.is_file() and entry.name.startswith("run_vllm.sh.bak."):
+                    parts = entry.name.split(".")
+                    timestamp = int(parts[-1]) if parts[-1].isdigit() else 0
+                    backups.append((entry.path, timestamp))
+            if backups:
+                backups.sort(key=lambda x: x[1], reverse=True)
+                latest_backup = backups[0][0]
+                try:
+                    with open(latest_backup, "r", encoding="utf-8") as f:
+                        known_good_content = f.read()
+                    known_good_backup_path = latest_backup
+                    state["logs"] += f"Found fallback recovery config backup: {os.path.basename(latest_backup)}\n"
+                except Exception as e:
+                    state["logs"] += f"Error reading fallback backup: {e}\n"
+    
+    # 2. Trigger the restart
+    try:
+        container = client.containers.get(container_name)
+        state["logs"] += f"Initiating Docker container restart for '{container_name}'...\n"
+        container.restart()
+    except Exception as e:
+        state["status"] = "failed"
+        state["error"] = f"Docker restart command failed: {e}"
+        state["logs"] += f"[Error] Docker restart command failed: {e}\n"
+        return
+
+    # 3. Monitor container boot/health (up to 120 seconds)
+    state["logs"] += "Monitoring startup health check (polling /health API)...\n"
+    healthy = False
+    log_err = "Timeout waiting for health check"
+    
+    for sec in range(120):
+        time.sleep(1.0)
+        try:
+            container.reload()
+            if container.status != "running":
+                log_tail = container.logs(tail=20).decode('utf-8', errors='replace')
+                log_err = f"Container crashed with status '{container.status}'"
+                state["logs"] += f"[Warning] Container is in status '{container.status}'. Log tail:\n{log_tail}\n"
+                break
+                
+            log_tail = container.logs(tail=30).decode('utf-8', errors='replace')
+            if "ValueError:" in log_tail or "RuntimeError:" in log_tail:
+                log_err = "Initialization error detected in logs"
+                for line in log_tail.splitlines():
+                    if "ValueError:" in line or "RuntimeError:" in line:
+                        log_err = line.strip()
+                state["logs"] += f"[Warning] Initialization error found in logs: {log_err}\n"
+                break
+        except Exception as e:
+            state["logs"] += f"Failed querying container status: {e}\n"
+            
+        try:
+            resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
+            if resp.status_code == 200:
+                healthy = True
+                state["logs"] += "✓ Success: Container passed health check and is online!\n"
+                break
+        except Exception:
+            pass
+            
+    if healthy:
+        state["status"] = "completed"
+        return
+        
+    # 4. Rollback Protocol
+    state["logs"] += f"\n[Fatal Update Failure] Health check failed: {log_err}.\n"
+    if known_good_content:
+        state["logs"] += "[Auto-Recovery] Rolling back configuration file and restarting container with last known-good configuration...\n"
+        try:
+            with open(run_vllm_path, "w", newline="\n", encoding="utf-8") as f:
+                f.write(known_good_content)
+            os.chmod(run_vllm_path, 0o755)
+            
+            container.restart()
+            
+            rollback_healthy = False
+            for sec in range(90):
+                time.sleep(1.0)
+                try:
+                    resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
+                    if resp.status_code == 200:
+                        rollback_healthy = True
+                        break
+                except Exception:
+                    pass
+            if rollback_healthy:
+                state["logs"] += "✓ Auto-Recovery Complete: Restored last known-good configuration. Service is online.\n"
+                state["status"] = "failed"
+                state["error"] = f"New config failed health check ({log_err}). Auto-recovered successfully to previous working state."
+            else:
+                state["logs"] += "❌ Fatal: Recovery container also failed to start. System requires manual intervention!\n"
+                state["status"] = "failed"
+                state["error"] = f"New config failed ({log_err}) and recovery config also failed to boot."
+        except Exception as rollback_err:
+            state["logs"] += f"❌ Critical failure during recovery rollback execution: {rollback_err}\n"
+            state["status"] = "failed"
+            state["error"] = f"New config failed ({log_err}) and recovery rollback failed: {rollback_err}"
+    else:
+        state["logs"] += "❌ Failure: No recovery configuration could be found to roll back to.\n"
+        state["status"] = "failed"
+        state["error"] = f"New config failed health check ({log_err}) and no recovery backup found."
+
 # API: Container control
 @app.post("/api/container/restart")
 def restart_vllm_container():
     global cached_kv_cache_capacity
     cached_kv_cache_capacity = None
-    client = docker.from_env()
-    try:
-        container = client.containers.get(VLLM_CONTAINER_NAME)
-        logger.info(f"Restarting container {VLLM_CONTAINER_NAME}...")
-        container.restart()
-        return {"status": "restarting", "message": f"Container {VLLM_CONTAINER_NAME} is restarting."}
-    except Exception as e:
-        logger.error(f"Failed to restart container: {e}")
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
+    
+    import uuid
+    restart_id = str(uuid.uuid4())
+    active_restarts[restart_id] = {
+        "status": "pending",
+        "logs": "Restart requested...\n",
+        "error": None
+    }
+    
+    t = threading.Thread(
+        target=safe_restart_container_thread,
+        args=(restart_id, VLLM_CONTAINER_NAME, RUN_VLLM_PATH),
+        daemon=True
+    )
+    t.start()
+    
+    return {
+        "status": "restarting",
+        "restart_id": restart_id,
+        "message": f"Container {VLLM_CONTAINER_NAME} health-monitored restart initiated."
+    }
+
+@app.get("/api/container/restart/status")
+def get_restart_status(restart_id: str):
+    state = active_restarts.get(restart_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Restart task not found")
+    return state
 
 @app.post("/api/container/stop")
 def stop_vllm_container():
@@ -2926,6 +3467,80 @@ def save_sampling_config(payload: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"Failed to save sampling settings: {str(e)}")
         
     return {"message": "Sampling parameters saved successfully"}
+
+active_system_updates: Dict[str, Any] = {
+    "status": "idle",
+    "progress": 0,
+    "logs": "",
+    "error": None
+}
+
+def run_system_update_task():
+    global active_system_updates
+    active_system_updates = {
+        "status": "updating",
+        "progress": 0,
+        "logs": "Initializing update process...\n",
+        "error": None
+    }
+    
+    if not os.path.exists("/app/.git"):
+        active_system_updates["status"] = "failed"
+        active_system_updates["error"] = "Not a git repository mount"
+        active_system_updates["logs"] += "[Error] /app/.git folder not found. Ensure the host project folder is mounted to /app in docker-compose.yml.\n"
+        return
+        
+    try:
+        active_system_updates["logs"] += "Running git pull origin main...\n"
+        process = subprocess.Popen(
+            ["git", "-C", "/app", "pull", "origin", "main"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            active_system_updates["logs"] += line
+            
+        rc = process.wait()
+        if rc == 0:
+            active_system_updates["status"] = "completed"
+            active_system_updates["progress"] = 100
+            active_system_updates["logs"] += "\n✓ System updated successfully from origin main! Please restart the container/service to apply changes.\n"
+        else:
+            active_system_updates["status"] = "failed"
+            active_system_updates["error"] = f"git pull exited with code {rc}"
+            active_system_updates["logs"] += f"\n[Error] Update failed with status code {rc}\n"
+    except Exception as e:
+        active_system_updates["status"] = "failed"
+        active_system_updates["error"] = str(e)
+        active_system_updates["logs"] += f"\n[Exception] Error during update: {e}\n"
+
+@app.get("/api/version")
+def get_version():
+    version_path = os.path.join(os.path.dirname(__file__), "version.txt")
+    if os.path.exists(version_path):
+        try:
+            with open(version_path, "r", encoding="utf-8") as f:
+                return {"version": f.read().strip()}
+        except Exception:
+            pass
+    return {"version": "1.000"}
+
+@app.post("/api/update")
+def start_system_update(background_tasks: BackgroundTasks):
+    if active_system_updates["status"] == "updating":
+        return {"message": "Update already in progress"}
+    background_tasks.add_task(run_system_update_task)
+    return {"message": "Update started in background"}
+
+@app.get("/api/update/status")
+def get_system_update_status():
+    return active_system_updates
 
 # Mount static files and templates
 # Wait! Let's ensure directories exist first before mounting
