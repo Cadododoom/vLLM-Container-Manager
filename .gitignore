@@ -11,3 +11,18 @@ ENV/
 .DS_Store
 .idea/
 .vscode/
+
+# Model cache (large model files)
+vllm-cache/
+
+# Log files
+*.txt
+!requirements.txt
+!version.txt
+!README.md
+
+# Scratch files
+scratch/
+
+# Backup files
+*.bak.*

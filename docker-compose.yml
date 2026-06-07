@@ -19,6 +19,10 @@ services:
     restart: unless-stopped
     depends_on:
       - vllm-server
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
 
   vllm-server:
     image: vllm/vllm-openai:latest
@@ -31,9 +35,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - HF_HUB_DISABLE_SYMLINKS=1
+      - VLLM_USE_V1=0
     entrypoint: ["/bin/sh", "/models/run_vllm.sh"]
     deploy:
       resources:
+        limits:
+          cpus: '4.0'
         reservations:
           devices:
             - driver: nvidia

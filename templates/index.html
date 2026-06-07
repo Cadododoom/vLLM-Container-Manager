@@ -50,14 +50,38 @@
         </div>
         
         <div class="header-status">
-            <!-- VRAM Quick View -->
-            <div class="vram-quick-view">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>VRAM</span>
-                    <span id="vram-quick-text" style="font-weight: bold; color: var(--accent-purple);">0.00 / 0.00 GB</span>
+            <!-- VRAM Header Container (for dynamic per-GPU bars) -->
+            <div id="vram-header-container" style="display: flex; gap: 16px; align-items: center;">
+                <div class="vram-quick-view">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span>VRAM</span>
+                        <span id="vram-quick-text" style="font-weight: bold; color: var(--accent-purple);">0.00 / 0.00 GB</span>
+                    </div>
+                    <div class="bar-bg">
+                        <div id="vram-quick-fill" class="bar-fill" style="background: linear-gradient(90deg, #3a86c8, #9d4edd); width: 0%;"></div>
+                    </div>
                 </div>
-                <div class="bar-bg">
-                    <div id="vram-quick-fill" class="bar-fill" style="background: linear-gradient(90deg, #3a86c8, #9d4edd); width: 0%;"></div>
+            </div>
+
+            <!-- Parallelism Quick Selectors -->
+            <div class="header-parallelism-selectors" style="display: flex; gap: 10px; align-items: center; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-color); padding: 6px 12px; border-radius: var(--radius-sm);">
+                <div style="display: flex; align-items: center; gap: 6px; font-size: 11px;">
+                    <span style="color: var(--text-secondary); font-weight: 500;" title="Tensor Parallel Size">TP:</span>
+                    <select id="header-tp-select" class="input-control mono" style="padding: 2px 6px; font-size: 11px; width: 55px; height: 24px; background: var(--bg-primary); border-radius: 4px; border: 1px solid var(--border-color);" onchange="updateParallelismFromHeader('tp')">
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="4">4</option>
+                        <option value="8">8</option>
+                    </select>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; font-size: 11px;">
+                    <span style="color: var(--text-secondary); font-weight: 500;" title="Pipeline Parallel Size">PP:</span>
+                    <select id="header-pp-select" class="input-control mono" style="padding: 2px 6px; font-size: 11px; width: 55px; height: 24px; background: var(--bg-primary); border-radius: 4px; border: 1px solid var(--border-color);" onchange="updateParallelismFromHeader('pp')">
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="4">4</option>
+                        <option value="8">8</option>
+                    </select>
                 </div>
             </div>
 
@@ -1437,6 +1461,7 @@
         loadLocalModels();
         loadConfiguration();
         loadGitRepos();
+        setupHFDownloaderAutoParsing();
     };
 
     // TAB MANAGEMENT
@@ -1555,15 +1580,44 @@
             text.innerText = `Offline (${data.container_status})`;
         }
 
-        // 2. VRAM Gauges
+        // 2. VRAM Header Dynamic Populate (Supports Multi-GPU readouts)
         const vramUsedMB = data.vram_used || 0;
         const vramTotalMB = data.vram_total || 10240; // Default to 10GB total if query fails
-        const vramPercentage = (vramUsedMB / vramTotalMB) * 100;
-        
-        const vramQuickTextEl = document.getElementById('vram-quick-text');
-        const vramQuickFillEl = document.getElementById('vram-quick-fill');
-        if (vramQuickTextEl) vramQuickTextEl.innerText = `${(vramUsedMB/1024).toFixed(2)} / ${(vramTotalMB/1024).toFixed(2)} GB`;
-        if (vramQuickFillEl) vramQuickFillEl.style.width = `${vramPercentage}%`;
+        const vramContainer = document.getElementById('vram-header-container');
+        if (vramContainer) {
+            if (data.gpus && data.gpus.length > 0) {
+                vramContainer.innerHTML = '';
+                data.gpus.forEach((gpu, idx) => {
+                    const gpuPercentage = (gpu.vram_used / gpu.vram_total) * 100;
+                    const gpuView = document.createElement('div');
+                    gpuView.className = 'vram-quick-view';
+                    gpuView.style.width = '145px';
+                    gpuView.innerHTML = `
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px;">
+                            <span title="${gpu.name}">GPU ${idx}</span>
+                            <span style="font-weight: bold; color: var(--accent-purple);">${(gpu.vram_used / 1024).toFixed(1)}/${(gpu.vram_total / 1024).toFixed(1)} GB</span>
+                        </div>
+                        <div class="bar-bg">
+                            <div class="bar-fill" style="background: linear-gradient(90deg, #3a86c8, #9d4edd); width: ${gpuPercentage}%;"></div>
+                        </div>
+                    `;
+                    vramContainer.appendChild(gpuView);
+                });
+            } else {
+                const vramPercentage = (vramUsedMB / vramTotalMB) * 100;
+                vramContainer.innerHTML = `
+                    <div class="vram-quick-view" style="width: 145px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px;">
+                            <span>VRAM</span>
+                            <span style="font-weight: bold; color: var(--accent-purple);">${(vramUsedMB / 1024).toFixed(1)}/${(vramTotalMB / 1024).toFixed(1)} GB</span>
+                        </div>
+                        <div class="bar-bg">
+                            <div class="bar-fill" style="background: linear-gradient(90deg, #3a86c8, #9d4edd); width: ${vramPercentage}%;"></div>
+                        </div>
+                    </div>
+                `;
+            }
+        }
         
         document.getElementById('gpu-name-value').innerText = data.gpu_name || "NVIDIA GPU";
         document.getElementById('gpu-util-value').innerText = `${data.gpu_utilization || 0}%`;
@@ -2054,6 +2108,55 @@
         });
     }
 
+    function guessTokenizerForModel(name) {
+        let nameLower = name.toLowerCase();
+        
+        // Qwen family
+        if (nameLower.includes('qwen')) {
+            // Check Qwen3.6
+            if (nameLower.includes('3.6') || nameLower.includes('36')) {
+                if (nameLower.includes('35b') || nameLower.includes('a3b')) {
+                    return 'Qwen/Qwen3.6-35B-A3B';
+                }
+            }
+            // Check Qwen2.5
+            if (nameLower.includes('2.5') || nameLower.includes('25')) {
+                if (nameLower.includes('72b')) return 'Qwen/Qwen2.5-72B-Instruct';
+                if (nameLower.includes('32b')) return 'Qwen/Qwen2.5-32B-Instruct';
+                if (nameLower.includes('14b')) return 'Qwen/Qwen2.5-14B-Instruct';
+                if (nameLower.includes('7b')) return 'Qwen/Qwen2.5-7B-Instruct';
+                if (nameLower.includes('3b')) return 'Qwen/Qwen2.5-3B-Instruct';
+                if (nameLower.includes('1.5b')) return 'Qwen/Qwen2.5-1.5B-Instruct';
+                if (nameLower.includes('0.5b')) return 'Qwen/Qwen2.5-0.5B-Instruct';
+            }
+            // Fallback for Qwen
+            return 'Qwen/Qwen2.5-7B-Instruct';
+        }
+        
+        // Llama 3/3.1 family
+        if (nameLower.includes('llama-3.1') || nameLower.includes('llama3.1')) {
+            if (nameLower.includes('405b')) return 'meta-llama/Llama-3.1-405B-Instruct';
+            if (nameLower.includes('70b')) return 'meta-llama/Llama-3.1-70B-Instruct';
+            if (nameLower.includes('8b')) return 'meta-llama/Llama-3.1-8B-Instruct';
+            return 'meta-llama/Llama-3.1-8B-Instruct';
+        }
+        if (nameLower.includes('llama-3') || nameLower.includes('llama3')) {
+            if (nameLower.includes('70b')) return 'meta-llama/Meta-Llama-3-70B-Instruct';
+            if (nameLower.includes('8b')) return 'meta-llama/Meta-Llama-3-8B-Instruct';
+            return 'meta-llama/Meta-Llama-3-8B-Instruct';
+        }
+        
+        // Mistral / Codestral
+        if (nameLower.includes('codestral')) {
+            return 'mistralai/Codestral-22B-v0.1';
+        }
+        if (nameLower.includes('mistral')) {
+            return 'mistralai/Mistral-7B-Instruct-v0.3';
+        }
+        
+        return 'Qwen/Qwen2.5-7B-Instruct'; // Global fallback
+    }
+
     function selectModelToLoad(path, type, name) {
         // Direct populate config page tab
         switchTab('config');
@@ -2064,7 +2167,9 @@
         // Auto served model name
         let servedName = name;
         if (path.endsWith('.gguf')) {
-            servedName = name.replace('.gguf', '');
+            let parts = name.split('/');
+            let base = parts[parts.length - 1];
+            servedName = base.replace('.gguf', '');
         }
         document.getElementById('cfg-served-model-name').value = servedName;
 
@@ -2073,12 +2178,8 @@
         
         if (isGGUF) {
             tokGroup.style.display = "block";
-            // Guess a tokenizer ID, e.g. Qwen/Qwen3.5-4B-Instruct
-            let guessedTokenizer = "Qwen/Qwen2.5-7B-Instruct"; // fallback
-            if (name.toLowerCase().includes('qwen')) {
-                if (name.toLowerCase().includes('4b')) guessedTokenizer = "Qwen/Qwen2.5-7B-Instruct"; // Qwen doesn't have 4B base in vLLM V1 tokenizer, let's use 7B
-                else guessedTokenizer = "Qwen/Qwen2.5-7B-Instruct";
-            }
+            // Guess a tokenizer ID based on model name specs
+            let guessedTokenizer = guessTokenizerForModel(name);
             document.getElementById('cfg-tokenizer').value = guessedTokenizer;
         } else {
             tokGroup.style.display = "none";
@@ -2100,23 +2201,121 @@
         document.getElementById('hf-transfer-warning').style.display = checked ? 'block' : 'none';
     }
 
+    function parseHFUrl(urlStr) {
+        if (!urlStr) return { repoId: "", filename: "" };
+        urlStr = urlStr.trim();
+        
+        let repoId = urlStr;
+        let filename = "";
+        
+        // Match HF URL pattern (http/https is optional, domain can be huggingface.co or hf.co)
+        const urlPattern = /^(?:https?:\/\/)?(?:www\.)?(?:huggingface\.co|hf\.co)\/([^\s?#]+)/i;
+        const match = urlStr.match(urlPattern);
+        
+        if (match) {
+            const pathParts = match[1].split('/');
+            if (pathParts.length >= 2) {
+                repoId = pathParts[0] + '/' + pathParts[1];
+                if (pathParts.length > 4 && (pathParts[2] === 'blob' || pathParts[2] === 'resolve' || pathParts[2] === 'tree')) {
+                    filename = pathParts.slice(4).join('/');
+                }
+            }
+            try {
+                const absoluteUrl = urlStr.match(/^https?:\/\//i) ? urlStr : 'https://' + urlStr;
+                const urlObj = new URL(absoluteUrl);
+                const showFileInfo = urlObj.searchParams.get('show_file_info');
+                if (showFileInfo) {
+                    filename = showFileInfo;
+                }
+            } catch (e) {
+                console.error("Failed to parse URL query params:", e);
+            }
+        } else if (urlStr.includes('/')) {
+            const parts = urlStr.split('/');
+            if (parts.length >= 2) {
+                repoId = parts[0] + '/' + parts[1];
+                if (parts.length > 2) {
+                    if (parts.length > 4 && (parts[2] === 'blob' || parts[2] === 'resolve' || parts[2] === 'tree')) {
+                        filename = parts.slice(4).join('/');
+                    } else {
+                        filename = parts.slice(2).join('/');
+                    }
+                }
+            }
+        }
+        
+        if (repoId) repoId = repoId.split(/[?#]/)[0];
+        if (filename) filename = filename.split(/[?#]/)[0];
+        
+        return { repoId, filename };
+    }
+
+    function setupHFDownloaderAutoParsing() {
+        const repoInput = document.getElementById('hf-repo-id');
+        const fileInput = document.getElementById('hf-filename');
+        
+        if (repoInput) {
+            repoInput.addEventListener('input', function() {
+                const val = repoInput.value.trim();
+                if (val.includes('huggingface.co') || val.includes('hf.co') || (val.includes('/') && val.split('/').length > 2)) {
+                    const parsed = parseHFUrl(val);
+                    if (parsed.repoId) {
+                        repoInput.value = parsed.repoId;
+                    }
+                    if (parsed.filename && fileInput && !fileInput.value.trim()) {
+                        fileInput.value = parsed.filename;
+                    }
+                }
+            });
+        }
+        
+        if (fileInput) {
+            fileInput.addEventListener('input', function() {
+                const val = fileInput.value.trim();
+                if (val.includes('huggingface.co') || val.includes('hf.co')) {
+                    const parsed = parseHFUrl(val);
+                    if (parsed.filename) {
+                        fileInput.value = parsed.filename;
+                    }
+                    if (parsed.repoId && repoInput && (!repoInput.value.trim() || repoInput.value === val)) {
+                        repoInput.value = parsed.repoId;
+                    }
+                }
+            });
+        }
+    }
+
     function downloadHFModel(event) {
         event.preventDefault();
-        let repoId = document.getElementById('hf-repo-id').value.trim();
-        const filename = document.getElementById('hf-filename').value.trim();
+        let repoIdInput = document.getElementById('hf-repo-id').value.trim();
+        let filenameInput = document.getElementById('hf-filename').value.trim();
         const token = document.getElementById('hf-token').value.trim() || null;
         const useMirror = document.getElementById('hf-mirror-endpoint').checked;
         const enableTransfer = document.getElementById('hf-enable-transfer').checked;
         const maxRetries = parseInt(document.getElementById('hf-max-retries').value) || 5;
         const inactivityTimeout = parseInt(document.getElementById('hf-inactivity-timeout').value) || 1200;
 
-        // Extract repo ID from full huggingface.co URLs if pasted
-        const hfUrlRegex = /huggingface\.co\/([^/]+\/[^/]+)/i;
-        const match = repoId.match(hfUrlRegex);
-        if (match) {
-            repoId = match[1];
-            document.getElementById('hf-repo-id').value = repoId; // update field display
+        let parsedRepo = parseHFUrl(repoIdInput);
+        let parsedFile = parseHFUrl(filenameInput);
+
+        let repoId = parsedRepo.repoId;
+        let filename = parsedFile.filename || filenameInput;
+
+        if (filenameInput.includes('huggingface.co') || filenameInput.includes('hf.co') || filenameInput.includes('/')) {
+            if (parsedFile.repoId && parsedFile.repoId.includes('/')) {
+                if (!repoId || !repoId.includes('/') || repoId === repoIdInput) {
+                    repoId = parsedFile.repoId;
+                }
+            }
         }
+        
+        if (parsedRepo.filename && !filename) {
+            filename = parsedRepo.filename;
+        }
+
+        // Update fields so the user sees the cleaned input
+        document.getElementById('hf-repo-id').value = repoId;
+        document.getElementById('hf-filename').value = filename;
         
         document.getElementById('download-progress-container').style.display = "block";
         document.getElementById('downloading-repo-title').innerText = `Preparing: ${repoId}`;
@@ -2154,34 +2353,17 @@
     }
 
     function downloadConfigModel(inputId) {
-        let repoId = document.getElementById(inputId).value.trim();
-        if (!repoId) {
+        let rawVal = document.getElementById(inputId).value.trim();
+        if (!rawVal) {
             alert("Please enter a HuggingFace repository ID first!");
             return;
         }
 
-        // Extract repo ID from full huggingface.co URLs if pasted
-        const hfUrlRegex = /huggingface\.co\/([^/]+\/[^/]+)/i;
-        const match = repoId.match(hfUrlRegex);
-        if (match) {
-            repoId = match[1];
-        }
-        
-        // Also support hf.co/ formats
-        const hfCoRegex = /hf\.co\/([^/]+\/[^/]+)/i;
-        const matchCo = repoId.match(hfCoRegex);
-        if (matchCo) {
-            repoId = matchCo[1];
-        }
+        const parsed = parseHFUrl(rawVal);
+        let repoId = parsed.repoId;
+        let filename = parsed.filename;
 
-        // Clean if it is just hf.co/user/repo or huggingface.co/user/repo without protocol
-        if (repoId.startsWith('hf.co/')) {
-            repoId = repoId.replace('hf.co/', '');
-        } else if (repoId.startsWith('huggingface.co/')) {
-            repoId = repoId.replace('huggingface.co/', '');
-        }
-
-        if (!repoId.includes('/')) {
+        if (!repoId || !repoId.includes('/')) {
             alert("Please enter a valid HuggingFace repository ID (format: username/repo-name)!");
             return;
         }
@@ -2191,6 +2373,7 @@
         
         // Populate Downloader Form on the models tab
         document.getElementById('hf-repo-id').value = repoId;
+        document.getElementById('hf-filename').value = filename || "";
         
         // Scroll/focus to the downloader and trigger the download!
         document.getElementById('hf-download-form').scrollIntoView({ behavior: 'smooth' });
@@ -2477,7 +2660,17 @@
                 if (mainTP) {
                     mainTP.removeEventListener('input', syncMainToCalculator);
                     mainTP.addEventListener('input', syncMainToCalculator);
+                    mainTP.removeEventListener('input', syncHeaderParallelismSelectors);
+                    mainTP.addEventListener('input', syncHeaderParallelismSelectors);
                 }
+                const mainPP = document.getElementById('cfg-pipeline-parallel-size');
+                if (mainPP) {
+                    mainPP.removeEventListener('input', syncHeaderParallelismSelectors);
+                    mainPP.addEventListener('input', syncHeaderParallelismSelectors);
+                }
+                
+                // Sync header dropdowns
+                syncHeaderParallelismSelectors();
             })
             .catch(err => alert("Failed to load vLLM configs: " + err))
             .finally(() => {
@@ -2509,8 +2702,16 @@
         const args = {};
 
         // Standard inputs
-        const model = document.getElementById('cfg-model').value.trim();
-        if (model) args.model = model;
+        let model = document.getElementById('cfg-model').value.trim();
+        if (model) {
+            // Automatically clean Hugging Face URLs if entered manually
+            let parsedModel = parseHFUrl(model);
+            if (parsedModel.repoId && !model.startsWith('/') && !model.endsWith('.gguf')) {
+                model = parsedModel.repoId;
+                document.getElementById('cfg-model').value = model;
+            }
+            args.model = model;
+        }
 
         const servedModelName = document.getElementById('cfg-served-model-name').value.trim();
         if (servedModelName) args['served-model-name'] = servedModelName;
@@ -2529,8 +2730,16 @@
 
         // GGUF Tokenizer
         if (model.endsWith('.gguf')) {
-            const tokenizer = document.getElementById('cfg-tokenizer').value.trim();
-            if (tokenizer) args.tokenizer = tokenizer;
+            let tokenizer = document.getElementById('cfg-tokenizer').value.trim();
+            if (tokenizer) {
+                // Automatically clean Hugging Face URLs if entered manually
+                let parsedTokenizer = parseHFUrl(tokenizer);
+                if (parsedTokenizer.repoId) {
+                    tokenizer = parsedTokenizer.repoId;
+                    document.getElementById('cfg-tokenizer').value = tokenizer;
+                }
+                args.tokenizer = tokenizer;
+            }
         }
 
         // Memory
@@ -2611,6 +2820,33 @@
 
     let pendingArgsToSave = null;
     
+    function syncHeaderParallelismSelectors() {
+        const tpInput = document.getElementById('cfg-tensor-parallel-size');
+        const ppInput = document.getElementById('cfg-pipeline-parallel-size');
+        
+        const headerTp = document.getElementById('header-tp-select');
+        const headerPp = document.getElementById('header-pp-select');
+        
+        if (headerTp && tpInput) headerTp.value = tpInput.value;
+        if (headerPp && ppInput) headerPp.value = ppInput.value;
+    }
+
+    function updateParallelismFromHeader(type) {
+        const tpVal = parseInt(document.getElementById('header-tp-select').value) || 1;
+        const ppVal = parseInt(document.getElementById('header-pp-select').value) || 1;
+        
+        // Update main configuration form fields
+        document.getElementById('cfg-tensor-parallel-size').value = tpVal;
+        document.getElementById('cfg-pipeline-parallel-size').value = ppVal;
+        
+        if (confirm(`Change parallelism partition to TP=${tpVal}, PP=${ppVal} and restart the vLLM server container?`)) {
+            saveConfiguration();
+        } else {
+            // Revert header selectors to match configuration
+            syncHeaderParallelismSelectors();
+        }
+    }
+
     function saveConfiguration(event) {
         if (event) event.preventDefault();
         

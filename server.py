@@ -438,6 +438,7 @@ def serialize_run_vllm_sh(preamble: str, args: Dict[str, Any]) -> str:
     content = preamble
     if not content.endswith("\n"):
         content += "\n"
+    content += "python3 /models/patch_vllm.py\n\n"
     content += "exec python3 -m vllm.entrypoints.openai.api_server \\\n"
     
     # Sort keys for consistent serialization
@@ -504,6 +505,8 @@ def resolve_model_config_and_size(model_path_or_id: str) -> Dict[str, Any]:
         model_type = "GGUF"
         model_name = os.path.basename(model_path_or_id)
         local_path = model_path_or_id
+        if local_path.startswith("/root/.cache/huggingface/"):
+            local_path = local_path.replace("/root/.cache/huggingface/", "/vllm-cache/")
         if not os.path.isabs(local_path):
             local_path = os.path.join("/models", local_path)
         if os.path.exists(local_path):
@@ -522,8 +525,12 @@ def resolve_model_config_and_size(model_path_or_id: str) -> Dict[str, Any]:
         }
 
     search_path = None
-    if os.path.isabs(model_path_or_id) and os.path.exists(model_path_or_id):
-        search_path = model_path_or_id
+    # Translate container cache path if needed for non-GGUF absolute paths
+    check_path = model_path_or_id
+    if check_path.startswith("/root/.cache/huggingface/"):
+        check_path = check_path.replace("/root/.cache/huggingface/", "/vllm-cache/")
+    if os.path.isabs(check_path) and os.path.exists(check_path):
+        search_path = check_path
     else:
         local_dir = os.path.join("/models", model_path_or_id)
         if os.path.exists(local_dir) and os.path.isdir(local_dir):
@@ -531,8 +538,14 @@ def resolve_model_config_and_size(model_path_or_id: str) -> Dict[str, Any]:
             model_type = "Local Directory"
         else:
             repo_folder = f"models--{model_path_or_id.replace('/', '--')}"
-            cache_snapshots = os.path.join("/vllm-cache/hub", repo_folder, "snapshots")
-            if os.path.exists(cache_snapshots):
+            cache_snapshots = None
+            for p in ["/vllm-cache", "/vllm-cache/hub"]:
+                cand = os.path.join(p, repo_folder, "snapshots")
+                if os.path.exists(cand):
+                    cache_snapshots = cand
+                    break
+                    
+            if cache_snapshots and os.path.exists(cache_snapshots):
                 try:
                     snaps = [s for s in os.scandir(cache_snapshots) if s.is_dir()]
                     if snaps:
@@ -1751,6 +1764,7 @@ def get_status():
         vram_total = 0
         gpu_util = 0
         gpu_name = "NVIDIA GPU"
+        gpus = []
         
         if status == "running":
             try:
@@ -1758,12 +1772,25 @@ def get_status():
                 res = container.exec_run("nvidia-smi --query-gpu=memory.used,memory.total,name,utilization.gpu --format=csv,noheader,nounits")
                 if res.exit_code == 0:
                     output = res.output.decode('utf-8').strip()
-                    parts = [p.strip() for p in output.split(',')]
-                    if len(parts) >= 4:
-                        vram_used = int(parts[0])
-                        vram_total = int(parts[1])
-                        gpu_name = parts[2]
-                        gpu_util = int(parts[3])
+                    for line in output.splitlines():
+                        if not line.strip():
+                            continue
+                        parts = [p.strip() for p in line.split(',')]
+                        if len(parts) >= 4:
+                            try:
+                                gpus.append({
+                                    "vram_used": int(parts[0]),
+                                    "vram_total": int(parts[1]),
+                                    "name": parts[2],
+                                    "utilization": int(parts[3])
+                                })
+                            except ValueError:
+                                pass
+                    if gpus:
+                        vram_used = sum(g["vram_used"] for g in gpus)
+                        vram_total = sum(g["vram_total"] for g in gpus)
+                        gpu_util = int(sum(g["utilization"] for g in gpus) / len(gpus))
+                        gpu_name = ", ".join(list(set(g["name"] for g in gpus)))
             except Exception as e:
                 logger.error(f"Failed to query nvidia-smi: {e}")
 
@@ -1781,6 +1808,7 @@ def get_status():
             "vram_total": vram_total,
             "gpu_utilization": gpu_util,
             "gpu_name": gpu_name,
+            "gpus": gpus,
             "requests_running": num_requests_running,
             "requests_waiting": num_requests_waiting,
             "gpu_cache_usage": gpu_cache_usage,
@@ -1805,6 +1833,7 @@ def get_status():
             "vram_total": 0,
             "gpu_utilization": 0,
             "gpu_name": "NVIDIA GPU",
+            "gpus": [],
             "requests_running": 0,
             "requests_waiting": 0,
             "gpu_cache_usage": 0.0,
@@ -1855,47 +1884,75 @@ def get_local_models():
                         "location": "local"
                     })
 
-    # 2. Scan /vllm-cache/hub for cached HF snapshots
-    cache_dir = "/vllm-cache/hub"
-    if os.path.exists(cache_dir):
-        for entry in os.scandir(cache_dir):
-            if entry.is_dir() and entry.name.startswith("models--"):
-                parts = entry.name.split("--")
-                if len(parts) >= 3:
-                    repo_id = "/".join(parts[1:])
-                    snapshots_dir = os.path.join(entry.path, "snapshots")
-                    if os.path.exists(snapshots_dir):
-                        for snap in os.scandir(snapshots_dir):
-                            if snap.is_dir():
-                                size = 0
-                                file_types = set()
-                                for root, _, files in os.walk(snap.path):
-                                    for f in files:
-                                        if f.endswith(".gguf"):
-                                            file_types.add("GGUF")
-                                        elif f.endswith(".safetensors"):
-                                            file_types.add("Safetensors")
-                                        try:
-                                            # os.path.getsize handles symlinks by resolving to blob file size
-                                            size += os.path.getsize(os.path.join(root, f))
-                                        except Exception:
-                                            pass
-                                
-                                m_type = "HuggingFace Hub"
-                                if "Safetensors" in file_types:
-                                    m_type = "HF (Safetensors)"
-                                elif "GGUF" in file_types:
-                                    m_type = "HF (GGUF)"
+    # 2. Scan /vllm-cache and /vllm-cache/hub for cached HF snapshots
+    cache_dirs = ["/vllm-cache", "/vllm-cache/hub"]
+    for cache_dir in cache_dirs:
+        if os.path.exists(cache_dir):
+            for entry in os.scandir(cache_dir):
+                if entry.is_dir() and entry.name.startswith("models--"):
+                    parts = entry.name.split("--")
+                    if len(parts) >= 3:
+                        repo_id = "/".join(parts[1:])
+                        snapshots_dir = os.path.join(entry.path, "snapshots")
+                        if os.path.exists(snapshots_dir):
+                            for snap in os.scandir(snapshots_dir):
+                                if snap.is_dir():
+                                    file_types = set()
+                                    gguf_files_found = []
+                                    size_total = 0
+                                    for root, _, files in os.walk(snap.path):
+                                        for f in files:
+                                            if f.endswith(".gguf"):
+                                                file_types.add("GGUF")
+                                                try:
+                                                    f_size = os.path.getsize(os.path.join(root, f))
+                                                except Exception:
+                                                    f_size = 0
+                                                gguf_files_found.append((os.path.join(root, f), f_size))
+                                            elif f.endswith(".safetensors"):
+                                                file_types.add("Safetensors")
+                                            try:
+                                                # os.path.getsize handles symlinks by resolving to blob file size
+                                                size_total += os.path.getsize(os.path.join(root, f))
+                                            except Exception:
+                                                pass
                                     
-                                local_models.append({
-                                    "name": repo_id,
-                                    "path": repo_id,  # HF models are loaded by repo ID
-                                    "repo_id": repo_id,
-                                    "type": m_type,
-                                    "size": size,
-                                    "location": "cache"
-                                })
-                                break
+                                    if "GGUF" in file_types:
+                                        # Yield each individual GGUF file as a model choice
+                                        for full_ui_path, f_size in gguf_files_found:
+                                            filename = os.path.basename(full_ui_path)
+                                            # Translate UI container path /vllm-cache to vllm-server path /root/.cache/huggingface
+                                            server_path = full_ui_path
+                                            if server_path.startswith("/vllm-cache/"):
+                                                server_path = server_path.replace("/vllm-cache/", "/root/.cache/huggingface/")
+                                            
+                                            # E.g. name: unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf
+                                            model_display_name = f"{repo_id}/{filename}"
+                                            
+                                            if not any(m["path"] == server_path for m in local_models):
+                                                local_models.append({
+                                                    "name": model_display_name,
+                                                    "path": server_path,
+                                                    "repo_id": repo_id,
+                                                    "type": "HF (GGUF)",
+                                                    "size": f_size,
+                                                    "location": "cache"
+                                                })
+                                    else:
+                                        m_type = "HuggingFace Hub"
+                                        if "Safetensors" in file_types:
+                                            m_type = "HF (Safetensors)"
+                                            
+                                        if not any(m["name"] == repo_id for m in local_models):
+                                            local_models.append({
+                                                "name": repo_id,
+                                                "path": repo_id,  # HF models are loaded by repo ID
+                                                "repo_id": repo_id,
+                                                "type": m_type,
+                                                "size": size_total,
+                                                "location": "cache"
+                                            })
+                                    break
                                 
     return local_models
 
@@ -1922,21 +1979,37 @@ def delete_model(payload: Dict[str, Any]):
                 raise HTTPException(status_code=404, detail="Model file or directory not found")
                 
         elif location == "cache":
-            if "/" not in path:
-                raise HTTPException(status_code=400, detail="Invalid cache model path")
-            parts = path.split("/")
-            if len(parts) < 2:
-                raise HTTPException(status_code=400, detail="Invalid cache model path format")
-            
-            dir_name = f"models--{parts[0]}--{parts[1]}"
-            cache_path = os.path.realpath(os.path.join("/vllm-cache/hub", dir_name))
-            
-            if not cache_path.startswith(os.path.realpath("/vllm-cache/hub")):
-                raise HTTPException(status_code=403, detail="Forbidden directory access")
-                
-            if os.path.exists(cache_path):
-                shutil.rmtree(cache_path)
+            if path.startswith("/root/.cache/huggingface/") or path.startswith("/vllm-cache/"):
+                # Extract the directory name
+                path_stripped = path.replace("/root/.cache/huggingface/", "").replace("/vllm-cache/", "")
+                parts = [p for p in path_stripped.split("/") if p]
+                if parts and parts[0].startswith("models--"):
+                    dir_name = parts[0]
+                else:
+                    raise HTTPException(status_code=400, detail="Invalid cache model path format")
             else:
+                if "/" not in path:
+                    raise HTTPException(status_code=400, detail="Invalid cache model path")
+                parts = path.split("/")
+                if len(parts) < 2:
+                    raise HTTPException(status_code=400, detail="Invalid cache model path format")
+                dir_name = f"models--{parts[0]}--{parts[1]}"
+            
+            # Check both possible cache locations
+            cache_paths = [
+                os.path.realpath(os.path.join("/vllm-cache", dir_name)),
+                os.path.realpath(os.path.join("/vllm-cache/hub", dir_name))
+            ]
+            
+            deleted = False
+            for cache_path in cache_paths:
+                # Ensure the path is within the vllm-cache directory to prevent path traversal
+                if cache_path.startswith(os.path.realpath("/vllm-cache")):
+                    if os.path.exists(cache_path):
+                        shutil.rmtree(cache_path)
+                        deleted = True
+            
+            if not deleted:
                 raise HTTPException(status_code=404, detail="Cached model directory not found")
         else:
             raise HTTPException(status_code=400, detail="Invalid location parameter")
@@ -1989,6 +2062,52 @@ def cleanup_model_locks(repo_id: str):
                                 logger.warning(f"Failed to remove stale lock file {fp}: {e}")
             except Exception as e:
                 logger.warning(f"Error cleaning locks directory {p}: {e}")
+
+def parse_hf_url(url_str: str):
+    if not url_str:
+        return None, None
+    url_str = url_str.strip()
+    repo_id = url_str
+    filename = None
+    
+    # Check if URL
+    if "huggingface.co" in url_str or "hf.co" in url_str:
+        # Normalize protocol
+        if not url_str.startswith("http://") and not url_str.startswith("https://"):
+            url_str = "https://" + url_str
+            
+        try:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url_str)
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if len(path_parts) >= 2:
+                repo_id = f"{path_parts[0]}/{path_parts[1]}"
+                if len(path_parts) > 4 and path_parts[2] in ('blob', 'resolve', 'tree'):
+                    filename = "/".join(path_parts[4:])
+            
+            # Check query params
+            query_params = parse_qs(parsed.query)
+            if 'show_file_info' in query_params:
+                filename = query_params['show_file_info'][0]
+        except Exception:
+            pass
+    elif "/" in url_str:
+        # Might be repo/filename format or just repo
+        parts = [p for p in url_str.split('/') if p]
+        if len(parts) >= 2:
+            repo_id = f"{parts[0]}/{parts[1]}"
+            if len(parts) > 2:
+                if len(parts) > 4 and parts[2] in ('blob', 'resolve', 'tree'):
+                    filename = "/".join(parts[4:])
+                else:
+                    filename = "/".join(parts[2:])
+                
+    if repo_id:
+        repo_id = repo_id.split('?')[0].split('#')[0]
+    if filename:
+        filename = filename.split('?')[0].split('#')[0]
+        
+    return repo_id, filename
 
 # Background HF Download Task
 def download_hf_model_task(
@@ -2080,12 +2199,19 @@ def download_hf_model_task(
 
             timeout_occurred = False
             last_cache_size = get_model_cache_size(repo_id)
+            last_activity_time = time.time()
+            poll_interval = 5.0
+            
             while True:
                 try:
-                    line = q.get(timeout=float(inactivity_timeout))
+                    # Poll queue with a short timeout to keep UI/logs updated and calculate speed
+                    line = q.get(timeout=poll_interval)
                     if line is None:
                         # EOF reached
                         break
+                    
+                    # We got some output, reset activity timer
+                    last_activity_time = time.time()
                     
                     active_downloads[repo_id]["logs"] += line
                     # Limit log buffer size
@@ -2111,24 +2237,36 @@ def download_hf_model_task(
                         active_downloads[repo_id]["eta"] = "N/A"
 
                 except queue.Empty:
-                    # Inactivity timeout! Check if cache size grew
+                    # Queue empty, check if download is making progress via file growth
                     current_cache_size = get_model_cache_size(repo_id)
+                    now = time.time()
+                    
                     if current_cache_size > last_cache_size:
+                        # Download is making progress, reset activity timer
+                        last_activity_time = now
                         diff_mb = (current_cache_size - last_cache_size) / (1024 * 1024)
-                        active_downloads[repo_id]["logs"] += f"\n[Info] No output for {inactivity_timeout}s, but cache size grew by {diff_mb:.2f} MB. Continuing download...\n"
-                        logger.info(f"Download for {repo_id} silent but active: grew by {diff_mb:.2f} MB")
-                        last_cache_size = current_cache_size
-                        continue
-                    else:
-                        timeout_occurred = True
-                        active_downloads[repo_id]["logs"] += f"\n[Warning] Inactivity timeout of {inactivity_timeout}s reached (no logs and no file size growth). Terminating download process...\n"
-                        logger.warning(f"Download for {repo_id} timed out after {inactivity_timeout}s of inactivity. Terminating...")
+                        speed_mbps = diff_mb / poll_interval
                         
-                        process.terminate()
-                        time.sleep(2)
-                        if process.poll() is None:
-                            process.kill()
-                        break
+                        # Update progress logs and status for UI
+                        active_downloads[repo_id]["speed"] = f"{speed_mbps:.2f} MB/s"
+                        active_downloads[repo_id]["eta"] = "Calculating..."
+                        
+                        active_downloads[repo_id]["logs"] += f"[Progress Check] Cache size grew by {diff_mb:.2f} MB ({speed_mbps:.2f} MB/s)\n"
+                        logger.info(f"Download for {repo_id} silent but active: grew by {diff_mb:.2f} MB ({speed_mbps:.2f} MB/s)")
+                        last_cache_size = current_cache_size
+                    else:
+                        # No output and no file growth. Check if inactivity timeout is exceeded
+                        elapsed = now - last_activity_time
+                        if elapsed >= float(inactivity_timeout):
+                            timeout_occurred = True
+                            active_downloads[repo_id]["logs"] += f"\n[Warning] Inactivity timeout of {inactivity_timeout}s reached (no logs and no file size growth). Terminating download process...\n"
+                            logger.warning(f"Download for {repo_id} timed out after {inactivity_timeout}s of inactivity. Terminating...")
+                            
+                            process.terminate()
+                            time.sleep(2)
+                            if process.poll() is None:
+                                process.kill()
+                            break
 
             rc = process.wait()
 
@@ -2182,6 +2320,33 @@ def download_model(payload: Dict[str, Any], background_tasks: BackgroundTasks):
     max_retries = int(payload.get("max_retries", 5))
     inactivity_timeout = int(payload.get("inactivity_timeout", 1200))
     
+    if not repo_id:
+        raise HTTPException(status_code=400, detail="repo_id is required")
+        
+    # Parse/clean repo_id and filename
+    # Let's extract information from both inputs if they are Hugging Face URLs
+    r_repo, r_file = parse_hf_url(repo_id)
+    
+    if filename:
+        f_repo, f_file = parse_hf_url(filename)
+        
+        # Determine final repo_id
+        final_repo = r_repo
+        if f_repo and ("huggingface.co" in filename or "hf.co" in filename or "/" in filename):
+            if not final_repo or "/" not in final_repo or final_repo == repo_id:
+                final_repo = f_repo
+        
+        # Determine final filename
+        final_file = f_file if ("huggingface.co" in filename or "hf.co" in filename or "/" in filename) else filename
+        if not final_file:
+            final_file = r_file
+    else:
+        final_repo = r_repo
+        final_file = r_file
+        
+    repo_id = final_repo
+    filename = final_file
+
     if not repo_id:
         raise HTTPException(status_code=400, detail="repo_id is required")
         
@@ -2772,6 +2937,7 @@ def safe_restart_container_thread(restart_id: str, container_name: str, run_vllm
                     state["logs"] += f"Error reading fallback backup: {e}\n"
     
     # 2. Trigger the restart
+    restart_time = int(time.time())
     try:
         container = client.containers.get(container_name)
         state["logs"] += f"Initiating Docker container restart for '{container_name}'...\n"
@@ -2782,40 +2948,63 @@ def safe_restart_container_thread(restart_id: str, container_name: str, run_vllm
         state["logs"] += f"[Error] Docker restart command failed: {e}\n"
         return
 
-    # 3. Monitor container boot/health (up to 120 seconds)
-    state["logs"] += "Monitoring startup health check (polling /health API)...\n"
+    # 3. Monitor container boot/health (up to 300 seconds)
+    is_new_idle = False
+    try:
+        if os.path.exists(run_vllm_path):
+            with open(run_vllm_path, "r", encoding="utf-8") as f:
+                new_content = f.read()
+            if "vllm.entrypoints.openai.api_server" not in new_content:
+                is_new_idle = True
+    except Exception:
+        pass
+
+    state["logs"] += "Monitoring startup status...\n"
     healthy = False
     log_err = "Timeout waiting for health check"
     
-    for sec in range(120):
+    for sec in range(300):
         time.sleep(1.0)
         try:
             container.reload()
             if container.status != "running":
-                log_tail = container.logs(tail=20).decode('utf-8', errors='replace')
+                log_tail = container.logs(since=restart_time, tail=20).decode('utf-8', errors='replace')
                 log_err = f"Container crashed with status '{container.status}'"
                 state["logs"] += f"[Warning] Container is in status '{container.status}'. Log tail:\n{log_tail}\n"
                 break
                 
-            log_tail = container.logs(tail=30).decode('utf-8', errors='replace')
-            if "ValueError:" in log_tail or "RuntimeError:" in log_tail:
+            log_tail = container.logs(since=restart_time, tail=30).decode('utf-8', errors='replace')
+            error_keywords = ["ValueError:", "RuntimeError:", "TypeError:", "NameError:", "AttributeError:", "ImportError:", "ModuleNotFoundError:", "FileNotFoundError:", "PermissionError:", "Traceback (most recent call last):", "Exception:", "vllm: error:", "Error:"]
+            found_err = None
+            for kw in error_keywords:
+                if kw in log_tail:
+                    found_err = kw
+                    break
+            if found_err:
                 log_err = "Initialization error detected in logs"
                 for line in log_tail.splitlines():
-                    if "ValueError:" in line or "RuntimeError:" in line:
+                    if any(ekw in line for ekw in error_keywords):
                         log_err = line.strip()
+                        break
                 state["logs"] += f"[Warning] Initialization error found in logs: {log_err}\n"
                 break
         except Exception as e:
             state["logs"] += f"Failed querying container status: {e}\n"
             
-        try:
-            resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
-            if resp.status_code == 200:
+        if is_new_idle:
+            if sec >= 5:
                 healthy = True
-                state["logs"] += "✓ Success: Container passed health check and is online!\n"
+                state["logs"] += "✓ Success: Idle container started successfully.\n"
                 break
-        except Exception:
-            pass
+        else:
+            try:
+                resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
+                if resp.status_code == 200:
+                    healthy = True
+                    state["logs"] += "✓ Success: Container passed health check and is online!\n"
+                    break
+            except Exception:
+                pass
             
     if healthy:
         state["status"] = "completed"
@@ -2833,13 +3022,23 @@ def safe_restart_container_thread(restart_id: str, container_name: str, run_vllm
             container.restart()
             
             rollback_healthy = False
+            is_rollback_idle = "vllm.entrypoints.openai.api_server" not in known_good_content
             for sec in range(90):
                 time.sleep(1.0)
                 try:
-                    resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
-                    if resp.status_code == 200:
-                        rollback_healthy = True
+                    container.reload()
+                    if container.status != "running":
                         break
+                    
+                    if is_rollback_idle:
+                        if sec >= 5:
+                            rollback_healthy = True
+                            break
+                    else:
+                        resp = httpx.get(f"{VLLM_API_URL}/health", timeout=1.0)
+                        if resp.status_code == 200:
+                            rollback_healthy = True
+                            break
                 except Exception:
                     pass
             if rollback_healthy:
