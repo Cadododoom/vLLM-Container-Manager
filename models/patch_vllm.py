@@ -928,6 +928,8 @@ if os.path.exists(file_path_kv_utils):
         with open(file_path_kv_utils, 'r', encoding='utf-8') as f:
             content = f.read()
 
+        changed_kv = False
+
         target_unify = '''def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
