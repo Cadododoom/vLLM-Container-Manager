@@ -17,8 +17,6 @@ services:
       - VLLM_CONTAINER_NAME=vllm-server
       - HF_HUB_DISABLE_SYMLINKS=1
     restart: unless-stopped
-    depends_on:
-      - vllm-server
     deploy:
       resources:
         limits:
@@ -38,11 +36,9 @@ services:
     entrypoint: ["/bin/sh", "/models/run_vllm.sh"]
     deploy:
       resources:
-        limits:
-          cpus: '4.0'
         reservations:
           devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+            - capabilities: ["gpu"]
+        limits:
+          cpus: '4.0'
     restart: "no"

@@ -52,6 +52,56 @@ active_tunings: Dict[str, Dict[str, Any]] = {}
 active_verifications: Dict[str, Dict[str, Any]] = {}
 active_restarts: Dict[str, Dict[str, Any]] = {}
 
+# GPU Model Loading Layer — supports pause/resume with last-known-good preservation
+active_model_loads: Dict[str, Dict[str, Any]] = {}
+
+PAUSE_FLAG_FILE = "/models/.pause_loading"
+
+def _is_persistently_paused() -> bool:
+    """Check if model loading is persistently paused (survives container restarts)."""
+    return os.path.exists(PAUSE_FLAG_FILE)
+
+def _set_pause(paused: bool) -> None:
+    """Set or clear persistent pause flag on disk."""
+    try:
+        if paused:
+            with open(PAUSE_FLAG_FILE, "w") as f:
+                f.write("paused")
+            logger.info(f"Model loading persistently paused — flag written to {PAUSE_FLAG_FILE}")
+        else:
+            if os.path.exists(PAUSE_FLAG_FILE):
+                os.remove(PAUSE_FLAG_FILE)
+                logger.info(f"Model loading un-paused — flag cleared from {PAUSE_FLAG_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to update pause flag: {e}")
+
+def _stop_vllm_process(container_name: str) -> bool:
+    """Stop the vLLM python process inside container to free GPUs immediately."""
+    try:
+        client = docker.from_env()
+        container = client.containers.get(container_name)
+        res = container.exec_run("pkill -f 'vllm.entrypoints.openai.api_server' || true")
+        if res.exit_code == 0:
+            logger.info(f"Stopped vLLM process in {container_name} to free GPUs")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to stop vLLM process: {e}")
+    return False
+
+def _get_container_pid(container_name: str) -> Optional[str]:
+    """Get the main PID of the container's entrypoint process."""
+    try:
+        client = docker.from_env()
+        container = client.containers.get(container_name)
+        inspect = container.attrs
+        pid = inspect.get("State", {}).get("Pid", 0)
+        return str(pid) if pid else None
+    except Exception:
+        return None
+
+# GPU Model Loading Layer — supports pause/resume with last-known-good preservation
+active_model_loads: Dict[str, Dict[str, Any]] = {}
+
 # Global variable to cache the parsed KV cache capacity (parsed from logs)
 cached_kv_cache_capacity: Optional[int] = None
 
@@ -2948,7 +2998,7 @@ def safe_restart_container_thread(restart_id: str, container_name: str, run_vllm
         state["logs"] += f"[Error] Docker restart command failed: {e}\n"
         return
 
-    # 3. Monitor container boot/health (up to 300 seconds)
+    # 3. Monitor container boot/health (up to 300 seconds) with pause/resume support
     is_new_idle = False
     try:
         if os.path.exists(run_vllm_path):
@@ -2963,8 +3013,102 @@ def safe_restart_container_thread(restart_id: str, container_name: str, run_vllm
     healthy = False
     log_err = "Timeout waiting for health check"
     
+    # Pause/resume support variables
+    paused_at_second = None
+    pause_log_snapshot = ""
+    persistent_pause_active = _is_persistently_paused()
+    
+    if persistent_pause_active:
+        state["logs"] += "[PAUSE INITIATED] Persistent pause flag detected — pausing model loading immediately...\n"
+        # Kill vLLM process immediately on startup if paused
+        try:
+            _stop_vllm_process(container_name)
+            state["logs"] += "[PAUSE INITIATED] vLLM process killed — waiting for resume signal.\n"
+        except Exception as e:
+            state["logs"] += f"[PAUSE INITIATED] Failed to stop vLLM process: {e}\n"
+    
     for sec in range(300):
         time.sleep(1.0)
+        
+        # Check persistent pause flag — wait for resume signal if paused
+        if _is_persistently_paused():
+            if paused_at_second is None:
+                paused_at_second = sec
+                state["logs"] += f"[PAUSED] Model loading paused at second {sec}. Waiting for user to resume...\n"
+                
+                # Kill vLLM process if running
+                try:
+                    _stop_vllm_process(container_name)
+                    state["logs"] += "[PAUSED] vLLM process stopped — GPUs freed.\n"
+                except Exception as e:
+                    state["logs"] += f"[PAUSED] Failed to stop vLLM process: {e}\n"
+                
+                # Save last known good config on pause
+                try:
+                    if os.path.exists(run_vllm_path):
+                        with open(run_vllm_path, "r", encoding="utf-8") as f:
+                            current_config = f.read()
+                        if not known_good_content or len(current_config) > len(known_good_content):
+                            known_good_content = current_config
+                except Exception as e:
+                    state["logs"] += f"[PAUSED] Failed to preserve config: {e}\n"
+                
+                # Preserve backup on disk
+                try:
+                    if os.path.exists(run_vllm_path) and known_good_content:
+                        backup_path = f"{run_vllm_path}.bak.{int(time.time())}"
+                        with open(backup_path, "w", encoding="utf-8") as f:
+                            f.write(known_good_content)
+                        state["logs"] += f"[PAUSED] Last-known-good config preserved to {os.path.basename(backup_path)}\n"
+                except Exception as e:
+                    state["logs"] += f"[PAUSED] Failed to write backup: {e}\n"
+                
+                # Keep checking for resume — don't break, just skip health checks
+                continue
+        
+        # Check for manual pause request from UI (active_model_loads)
+        if restart_id in active_model_loads and active_model_loads[restart_id].get("paused"):
+            if paused_at_second is None:
+                paused_at_second = sec
+                pause_log_snapshot = state["logs"][-2000:] if len(state["logs"]) > 2000 else state["logs"]
+                state["logs"] += f"[PAUSED] Model loading paused at second {sec}. Stopping vLLM process to free GPUs...\n"
+                
+                # Kill the vLLM python process inside container immediately
+                try:
+                    _stop_vllm_process(container_name)
+                    state["logs"] += "[PAUSED] vLLM process stopped — GPUs freed.\n"
+                except Exception as e:
+                    state["logs"] += f"[PAUSED] Failed to stop vLLM process: {e}\n"
+                
+                # Save last known good config on pause
+                try:
+                    if os.path.exists(run_vllm_path):
+                        with open(run_vllm_path, "r", encoding="utf-8") as f:
+                            current_config = f.read()
+                        if not known_good_content or len(current_config) > len(known_good_content):
+                            known_good_content = current_config
+                except Exception as e:
+                    state["logs"] += f"[PAUSED] Failed to preserve config: {e}\n"
+                
+                # Preserve backup on disk
+                try:
+                    if os.path.exists(run_vllm_path) and known_good_content:
+                        backup_path = f"{run_vllm_path}.bak.{int(time.time())}"
+                        with open(backup_path, "w", encoding="utf-8") as f:
+                            f.write(known_good_content)
+                        state["logs"] += f"[PAUSED] Last-known-good config preserved to {os.path.basename(backup_path)}\n"
+                except Exception as e:
+                    state["logs"] += f"[PAUSED] Failed to write backup: {e}\n"
+                
+                # Keep checking for resume — don't break, just skip health checks
+                continue
+        
+        # Check for resume request (manual un-pause from UI)
+        if restart_id in active_model_loads and not active_model_loads[restart_id].get("paused") and paused_at_second is not None:
+            state["logs"] += f"[RESUMED] Resuming model loading from second {paused_at_second}...\n"
+            paused_at_second = None
+            pause_log_snapshot = ""
+        
         try:
             container.reload()
             if container.status != "running":
@@ -3092,7 +3236,647 @@ def get_restart_status(restart_id: str):
         raise HTTPException(status_code=404, detail="Restart task not found")
     return state
 
-@app.post("/api/container/stop")
+# GPU Pause/Resume — persistent toggle that survives container restarts
+@app.get("/api/container/pause/status")
+def get_pause_status():
+    """Check if model loading is persistently paused (survives across restarts)."""
+    return {
+        "paused": _is_persistently_paused(),
+        "message": "Model loading is paused — settings can be changed freely" if _is_persistently_paused() else "Model loading active"
+    }
+
+@app.post("/api/container/pause")
+def toggle_pause():
+    """Toggle persistent pause state. If already paused, un-pauses it."""
+    currently_paused = _is_persistently_paused()
+    
+    if currently_paused:
+        # Un-pause: clear flag and restart container to resume loading
+        _set_pause(False)
+        
+        client = docker.from_env()
+        try:
+            container = client.containers.get(VLLM_CONTAINER_NAME)
+            container.restart()
+            return {
+                "status": "resuming",
+                "paused": False,
+                "message": "Model loading resumed — container restarting"
+            }
+        except docker.errors.NotFound:
+            return {
+                "status": "resumed_no_container",
+                "paused": False,
+                "message": "Pause flag cleared. Start container to resume model loading."
+            }
+        except Exception as e:
+            logger.error(f"Failed to resume: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        # Pause: set persistent flag and kill vLLM process if running
+        _set_pause(True)
+        
+        client = docker.from_env()
+        try:
+            container = client.containers.get(VLLM_CONTAINER_NAME)
+            stopped = _stop_vllm_process(VLLM_CONTAINER_NAME)
+            
+            # Preserve last-known-good config
+            try:
+                if os.path.exists(RUN_VLLM_PATH):
+                    with open(RUN_VLLM_PATH, "r", encoding="utf-8") as f:
+                        current_config = f.read()
+                    backup_path = f"{RUN_VLLM_PATH}.bak.{int(time.time())}"
+                    with open(backup_path, "w", encoding="utf-8") as f:
+                        f.write(current_config)
+            except Exception as e:
+                logger.error(f"Failed to preserve config on pause: {e}")
+            
+            return {
+                "status": "paused",
+                "paused": True,
+                "message": "Model loading paused — GPUs freed. Change settings freely.",
+                "gpu_freed": stopped
+            }
+        except docker.errors.NotFound:
+            # Container not running — just set the flag
+            return {
+                "status": "paused_no_container",
+                "paused": True,
+                "message": "Pause flag set. Start container to resume model loading."
+            }
+        except Exception as e:
+            logger.error(f"Failed to pause: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/container/resume")
+def resume_model_loading():
+    """Resume model loading by clearing pause flag and restarting container."""
+    _set_pause(False)
+    
+    client = docker.from_env()
+    try:
+        container = client.containers.get(VLLM_CONTAINER_NAME)
+        container.restart()
+        return {
+            "status": "resuming",
+            "paused": False,
+            "message": "Model loading resumed — container restarting"
+        }
+    except docker.errors.NotFound:
+        return {
+            "status": "resumed_no_container",
+            "paused": False,
+            "message": "Pause flag cleared. Start container to resume model loading."
+        }
+    except Exception as e:
+        logger.error(f"Failed to resume: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# GPU MONITOR & SELECTION API ENDPOINTS
+# ============================================================
+
+GPU_ASSIGNMENT_FILE = "/models/gpu_assignment.json"
+GPU_HISTORY_FILE = "/models/gpu_history.json"
+
+# In-memory ring buffer for 24-hour history (1 data point per minute)
+# Max ~1440 points per metric
+MAX_HISTORY_POINTS = 1440
+gpu_history_buffer: Dict[str, List[Dict]] = {
+    "timestamps": [],
+    "gpu_vram_used_mb": {},
+    "gpu_temp_c": {},
+    "gpu_fan_pct": {}
+}
+
+def _record_gpu_metrics(gpu_data: List[Dict]) -> None:
+    """Record current GPU metrics into the ring buffer."""
+    now = time.time()
+    
+    # Add timestamp (keep only last 1440 points)
+    gpu_history_buffer["timestamps"].append(now)
+    if len(gpu_history_buffer["timestamps"]) > MAX_HISTORY_POINTS:
+        gpu_history_buffer["timestamps"] = gpu_history_buffer["timestamps"][-MAX_HISTORY_POINTS:]
+    
+    for gpu in gpu_data:
+        idx = str(gpu.get("index", 0))
+        
+        # VRAM used (MB)
+        vram_used = gpu.get("vram_used_mb", 0) or 0
+        if idx not in gpu_history_buffer["gpu_vram_used_mb"]:
+            gpu_history_buffer["gpu_vram_used_mb"][idx] = []
+        gpu_history_buffer["gpu_vram_used_mb"][idx].append(vram_used)
+        if len(gpu_history_buffer["gpu_vram_used_mb"][idx]) > MAX_HISTORY_POINTS:
+            gpu_history_buffer["gpu_vram_used_mb"][idx] = gpu_history_buffer["gpu_vram_used_mb"][idx][-MAX_HISTORY_POINTS:]
+        
+        # Temperature (°C)
+        temp = gpu.get("temp_c", 0) or 0
+        if idx not in gpu_history_buffer["gpu_temp_c"]:
+            gpu_history_buffer["gpu_temp_c"][idx] = []
+        gpu_history_buffer["gpu_temp_c"][idx].append(temp)
+        if len(gpu_history_buffer["gpu_temp_c"][idx]) > MAX_HISTORY_POINTS:
+            gpu_history_buffer["gpu_temp_c"][idx] = gpu_history_buffer["gpu_temp_c"][idx][-MAX_HISTORY_POINTS:]
+        
+        # Fan speed (%)
+        fan = gpu.get("fan_pct", 0) or 0
+        if idx not in gpu_history_buffer["gpu_fan_pct"]:
+            gpu_history_buffer["gpu_fan_pct"][idx] = []
+        gpu_history_buffer["gpu_fan_pct"][idx].append(fan)
+        if len(gpu_history_buffer["gpu_fan_pct"][idx]) > MAX_HISTORY_POINTS:
+            gpu_history_buffer["gpu_fan_pct"][idx] = gpu_history_buffer["gpu_fan_pct"][idx][-MAX_HISTORY_POINTS:]
+
+def _persist_gpu_history() -> None:
+    """Persist ring buffer to disk file."""
+    try:
+        payload = {
+            "timestamps": gpu_history_buffer["timestamps"][-MAX_HISTORY_POINTS:],
+            "gpu_vram_used_mb": {k: v[-MAX_HISTORY_POINTS:] for k, v in gpu_history_buffer["gpu_vram_used_mb"].items()},
+            "gpu_temp_c": {k: v[-MAX_HISTORY_POINTS:] for k, v in gpu_history_buffer["gpu_temp_c"].items()},
+            "gpu_fan_pct": {k: v[-MAX_HISTORY_POINTS:] for k, v in gpu_history_buffer["gpu_fan_pct"].items()}
+        }
+        with open(GPU_HISTORY_FILE, "w") as f:
+            json.dump(payload, f)
+    except Exception as e:
+        logger.error(f"Failed to persist GPU history: {e}")
+
+def _load_gpu_history() -> None:
+    """Load persisted GPU history from disk on startup."""
+    global gpu_history_buffer
+    try:
+        if os.path.exists(GPU_HISTORY_FILE):
+            with open(GPU_HISTORY_FILE, "r") as f:
+                data = json.load(f)
+            gpu_history_buffer["timestamps"] = data.get("timestamps", [])
+            for k, v in data.get("gpu_vram_used_mb", {}).items():
+                gpu_history_buffer["gpu_vram_used_mb"][k] = v[-MAX_HISTORY_POINTS:]
+            for k, v in data.get("gpu_temp_c", {}).items():
+                gpu_history_buffer["gpu_temp_c"][k] = v[-MAX_HISTORY_POINTS:]
+            for k, v in data.get("gpu_fan_pct", {}).items():
+                gpu_history_buffer["gpu_fan_pct"][k] = v[-MAX_HISTORY_POINTS:]
+    except Exception as e:
+        logger.error(f"Failed to load GPU history: {e}")
+
+def _get_gpu_assignment() -> Dict[str, Any]:
+    """Load current GPU assignment from disk."""
+    try:
+        if os.path.exists(GPU_ASSIGNMENT_FILE):
+            with open(GPU_ASSIGNMENT_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load GPU assignment: {e}")
+    return {"tp_slots": [], "pp_slots": []}
+
+def _save_gpu_assignment(data: Dict[str, Any]) -> None:
+    """Save GPU assignment to disk."""
+    try:
+        with open(GPU_ASSIGNMENT_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save GPU assignment: {e}")
+
+def _parse_nvidia_smi() -> List[Dict]:
+    """Parse nvidia-smi output into structured GPU metrics with multiple fallback methods."""
+    gpus = []
+    
+    # ============================================================
+    # Method 1: Direct subprocess nvidia-smi (Linux) or nvidia-smi.exe (Windows)
+    # ============================================================
+    try:
+        import subprocess
+        import sys as _sys
+        
+        # Find nvidia-smi executable with Windows fallback paths
+        nvidia_smi_cmd = "nvidia-smi"
+        if _sys.platform == "win32":
+            nvidia_smi_cmd = "nvidia-smi.exe"
+            # Try common NVIDIA driver installation paths on Windows
+            for base_path in [
+                r"C:\Program Files\NVIDIA Corporation\NVSMI",
+                r"C:\Windows\System32",
+            ]:
+                try:
+                    full_path = os.path.join(base_path, "nvidia-smi.exe")
+                    if os.path.exists(full_path):
+                        nvidia_smi_cmd = full_path
+                        break
+                except Exception:
+                    continue
+        
+        # Try direct subprocess call first (list form - more reliable)
+        try:
+            res = subprocess.run(
+                [nvidia_smi_cmd, "--query-gpu=index,name,pci.bus_id,uuid,memory.used,memory.total,"
+                 "temperature.gpu,fan.speed,pcie.link.gen.current,pcie.link.width.max,"
+                 "utilization.gpu --format=csv,noheader,nounits"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5.0
+            )
+        except FileNotFoundError:
+            # Fallback to shell=True if list form fails (Windows compatibility)
+            res = subprocess.run(
+                f'"{nvidia_smi_cmd}" --query-gpu=index,name,pci.bus_id,uuid,memory.used,memory.total,'
+                f'temperature.gpu,fan.speed,pcie.link.gen.current,pcie.link.width.max,'
+                f'utilization.gpu --format=csv,noheader,nounits',
+                shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5.0
+            )
+        
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.strip().splitlines():
+                if not line.strip():
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 12:
+                    gpus.append({
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "pci_bus_id": parts[2],
+                        "uuid": parts[3],
+                        "vram_used_mb": int(parts[4]) if parts[4] else 0,
+                        "vram_total_mb": int(parts[5]) if parts[5] else 0,
+                        "temp_c": int(parts[6]) if parts[6] else 0,
+                        "fan_pct": int(parts[7]) if parts[7] else 0,
+                        "pcie_gen": int(parts[8]) if parts[8] else 0,
+                        "pcie_width_max": int(parts[9]) if parts[9] else 0,
+                        "utilization_gpu": int(parts[10]) if parts[10] else 0
+                    })
+            if gpus:
+                logger.info(f"GPU detection via nvidia-smi: {len(gpus)} GPUs found")
+                return gpus
+        else:
+            logger.debug(f"nvidia-smi returned rc={res.returncode}, stderr={res.stderr[:200] if res.stderr else 'none'}")
+    except Exception as e:
+        logger.warning(f"nvidia-smi subprocess failed: {e}")
+    
+    # ============================================================
+    # Method 2: Try nvidia-ml-py (pynvml) — pure-Python NVML binding
+    # ============================================================
+    try:
+        import ctypes
+        
+        # Try loading NVML library with platform-specific paths
+        nvml_lib = None
+        lib_paths_to_try = []
+        
+        if _sys.platform == "win32":
+            # Windows: nvcuda.dll or explicit NVML path
+            for base in [r"C:\Windows\System32", r"C:\Program Files\NVIDIA Corporation"]:
+                try:
+                    full = os.path.join(base, "nvcuda.dll")
+                    if os.path.exists(full):
+                        lib_paths_to_try.append(full)
+                        break
+                except Exception:
+                    continue
+            # Also try standard library names (Windows may have nvidia-smi driver files)
+            for name in ["libnvml.so", "libnvml.so.1", "nvcuda.dll"]:
+                lib_paths_to_try.append(name)
+        else:
+            # Linux/Unix
+            for path in ["/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", 
+                         "/usr/lib/libnvidia-ml.so.1", "libnvml.so.1", "libnvml.so"]:
+                lib_paths_to_try.append(path)
+        
+        # Try loading each library path
+        for lib_path in lib_paths_to_try:
+            try:
+                nvml_lib = ctypes.CDLL(lib_path)
+                logger.debug(f"Successfully loaded NVML from: {lib_path}")
+                break
+            except Exception:
+                continue
+        
+        if nvml_lib is None:
+            raise ImportError("Could not load any NVML library")
+        
+        # Initialize NVML
+        nvml_lib.nvmlInit_v2.restype = ctypes.c_int
+        init_ret = nvml_lib.nvmlInit_v2()
+        if init_ret != 0:  # NVML_SUCCESS = 0
+            raise OSError(f"nvmlInit_v2 failed with code {init_ret}")
+        
+        # Get device count
+        nvml_lib.nvmlDeviceGetCount_v2.restype = ctypes.c_int
+        nvml_lib.nvmlDeviceGetCount_v2.argtypes = [ctypes.POINTER(ctypes.c_uint)]
+        count = ctypes.c_uint(0)
+        ret = nvml_lib.nvmlDeviceGetCount_v2(ctypes.byref(count))
+        if ret != 0:
+            raise OSError(f"nvmlDeviceGetCount_v2 failed with code {ret}")
+        
+        # Get properties for each device
+        NVML_DEVICE_NAME_MAX = 96
+        NVML_STRING_BUFFER_SIZE = 64
+        NVML_MAX_GPU_PROPS = 16
+        
+        for i in range(count.value):
+            dev = ctypes.c_void_p()
+            
+            # Get handle by index
+            nvml_lib.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
+            nvml_lib.nvmlDeviceGetHandleByIndex_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            ret = nvml_lib.nvmlDeviceGetHandleByIndex_v2(ctypes.c_uint(i), ctypes.byref(dev))
+            if ret != 0:
+                logger.warning(f"nvmlDeviceGetHandleByIndex_v2 failed for device {i}, code {ret}")
+                continue
+            
+            # Get device name
+            nvml_lib.nvmlDeviceGetName.restype = ctypes.c_int
+            nvml_lib.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char), ctypes.c_uint]
+            name_buf = ctypes.create_string_buffer(NVML_STRING_BUFFER_SIZE)
+            ret = nvml_lib.nvmlDeviceGetName(dev, name_buf, NVML_STRING_BUFFER_SIZE)
+            device_name = name_buf.value.decode('utf-8', errors='replace') if ret == 0 else f"GPU {i}"
+            
+            # Get UUID
+            nvml_lib.nvmlDeviceGetUUID.restype = ctypes.c_int
+            nvml_lib.nvmlDeviceGetUUID.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char), ctypes.c_uint]
+            uuid_buf = ctypes.create_string_buffer(96)
+            ret = nvml_lib.nvmlDeviceGetUUID(dev, uuid_buf, 96)
+            device_uuid = uuid_buf.value.decode('utf-8', errors='replace')[:36] if ret == 0 else f"GPU-{i}-uuid"
+            
+            # Get memory info using nvmlMemory_t struct
+            class nvmlMemory_t(ctypes.Structure):
+                _fields_ = [
+                    ("total", ctypes.c_ulonglong),
+                    ("used", ctypes.c_ulonglong),
+                    ("free", ctypes.c_ulonglong),
+                ]
+            
+            nvml_lib.nvmlDeviceGetMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(nvmlMemory_t)]
+            mem_info = nvmlMemory_t()
+            ret = nvml_lib.nvmlDeviceGetMemoryInfo(dev, ctypes.byref(mem_info))
+            total_mb = int(mem_info.total / (1024 * 1024)) if ret == 0 else 0
+            used_mb = int(mem_info.used / (1024 * 1024)) if ret == 0 else 0
+            
+            # Get temperature
+            nvml_lib.nvmlDeviceGetTemperature.restype = ctypes.c_int
+            nvml_lib.nvmlDeviceGetTemperature.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            temp_c = ctypes.c_int(0)
+            ret = nvml_lib.nvmlDeviceGetTemperature(dev, 0, ctypes.byref(temp_c))
+            temperature = temp_c.value if ret == 0 else 0
+            
+            # Get fan speed
+            nvml_lib.nvmlDeviceGetFanSpeed.restype = ctypes.c_int
+            nvml_lib.nvmlDeviceGetFanSpeed.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+            fan_speed = ctypes.c_uint(0)
+            ret = nvml_lib.nvmlDeviceGetFanSpeed(dev, ctypes.byref(fan_speed))
+            fan_pct = fan_speed.value if ret == 0 else 0
+            
+            gpus.append({
+                "index": i,
+                "name": device_name.strip() if device_name.strip() else f"GPU {i}",
+                "pci_bus_id": "",  # NVML doesn't provide PCI bus ID directly
+                "uuid": device_uuid,
+                "vram_used_mb": used_mb,
+                "vram_total_mb": total_mb,
+                "temp_c": temperature,
+                "fan_pct": fan_pct,
+                "pcie_gen": 0,
+                "pcie_width_max": 0,
+                "utilization_gpu": 0
+            })
+        
+        if gpus:
+            logger.info(f"GPU detection via pynvml/NVML: {len(gpus)} GPUs found")
+            return gpus
+        
+    except Exception as e:
+        logger.warning(f"pynvml/NVML fallback failed: {e}")
+    
+    # ============================================================
+    # Method 3: Try PyTorch CUDA — last resort pure-Python detection
+    # ============================================================
+    try:
+        import torch
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(i)
+                gpus.append({
+                    "index": i,
+                    "name": props.name,
+                    "pci_bus_id": "",
+                    "uuid": f"GPU-{i}-torch",
+                    "vram_used_mb": 0,
+                    "vram_total_mb": int(props.total_mem_mb),
+                    "temp_c": 0,
+                    "fan_pct": 0,
+                    "pcie_gen": 0,
+                    "pcie_width_max": 0,
+                    "utilization_gpu": 0
+                })
+            if gpus:
+                logger.info(f"GPU detection via PyTorch CUDA: {len(gpus)} GPUs found")
+                return gpus
+    except Exception as e:
+        logger.warning(f"PyTorch CUDA fallback failed: {e}")
+    
+    # ============================================================
+    # Method 4: Try Docker container exec — if vLLM container is running with GPU access
+    # ============================================================
+    try:
+        client = docker.from_env()
+        container = client.containers.get(VLLM_CONTAINER_NAME)
+        if container.status == "running":
+            res = container.exec_run(
+                'nvidia-smi --query-gpu=index,name,pci.bus_id,uuid,memory.used,memory.total,'
+                'temperature.gpu,fan.speed,pcie.link.gen.current,pcie.link.width.max,'
+                'utilization.gpu --format=csv,noheader,nounits'
+            )
+            if res.exit_code == 0:
+                for line in res.output.decode('utf-8', errors='replace').strip().splitlines():
+                    if not line.strip():
+                        continue
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 12:
+                        gpus.append({
+                            "index": int(parts[0]),
+                            "name": parts[1],
+                            "pci_bus_id": parts[2],
+                            "uuid": parts[3],
+                            "vram_used_mb": int(parts[4]) if parts[4] else 0,
+                            "vram_total_mb": int(parts[5]) if parts[5] else 0,
+                            "temp_c": int(parts[6]) if parts[6] else 0,
+                            "fan_pct": int(parts[7]) if parts[7] else 0,
+                            "pcie_gen": int(parts[8]) if parts[8] else 0,
+                            "pcie_width_max": int(parts[9]) if parts[9] else 0,
+                            "utilization_gpu": int(parts[10]) if parts[10] else 0
+                        })
+                if gpus:
+                    logger.info(f"GPU detection via Docker container exec: {len(gpus)} GPUs found")
+                    return gpus
+    except Exception as e:
+        logger.warning(f"Docker container exec fallback failed: {e}")
+    
+    # ============================================================
+    # Method 5: Try shell=True nvidia-smi (Windows edge case)
+    # ============================================================
+    try:
+        res = subprocess.run(
+            f'"{nvidia_smi_cmd}" --query-gpu=index,name,pci.bus_id,uuid,memory.used,memory.total,'
+            'temperature.gpu,fan.speed,pcie.link.gen.current,pcie.link.width.max,'
+            'utilization.gpu --format=csv,noheader,nounits',
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5.0
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.strip().splitlines():
+                if not line.strip():
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 12:
+                    gpus.append({
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "pci_bus_id": parts[2],
+                        "uuid": parts[3],
+                        "vram_used_mb": int(parts[4]) if parts[4] else 0,
+                        "vram_total_mb": int(parts[5]) if parts[5] else 0,
+                        "temp_c": int(parts[6]) if parts[6] else 0,
+                        "fan_pct": int(parts[7]) if parts[7] else 0,
+                        "pcie_gen": int(parts[8]) if parts[8] else 0,
+                        "pcie_width_max": int(parts[9]) if parts[9] else 0,
+                        "utilization_gpu": int(parts[10]) if parts[10] else 0
+                    })
+            if gpus:
+                logger.info(f"GPU detection via nvidia-smi shell: {len(gpus)} GPUs found")
+    except Exception as e:
+        logger.warning(f"nvidia-smi shell fallback failed: {e}")
+    
+    # Final fallback: return empty list (UI will show "No GPUs detected")
+    if not gpus:
+        logger.info("GPU detection complete — no GPUs detected via any method")
+    else:
+        logger.debug(f"Final GPU count: {len(gpus)}")
+    
+    return gpus
+
+# Periodic history recorder (runs every minute in background)
+def _gpu_history_recorder():
+    """Background thread that records GPU metrics every 60 seconds."""
+    while True:
+        time.sleep(60)
+        try:
+            gpu_data = _parse_nvidia_smi()
+            if gpu_data:
+                _record_gpu_metrics(gpu_data)
+                # Persist to disk every 5 minutes (every 5 recordings)
+                if len(gpu_history_buffer["timestamps"]) % 5 == 0:
+                    _persist_gpu_history()
+        except Exception as e:
+            logger.error(f"GPU history recorder error: {e}")
+
+# Start GPU history recorder on startup
+def _start_gpu_history_recorder():
+    t = threading.Thread(target=_gpu_history_recorder, daemon=True)
+    t.start()
+    logger.info("GPU history recorder started (records every 60s)")
+
+# Register the recorder to run on app startup
+@app.on_event("startup")
+def _register_startup_hooks():
+    load_last_verified_context()
+    load_last_speed_diagnostic()
+    t = threading.Thread(target=vllm_container_monitor_loop, daemon=True)
+    t.start()
+    # Load persisted GPU history and start recorder
+    _load_gpu_history()
+    _start_gpu_history_recorder()
+
+# ============================================================
+# API ENDPOINTS: GPU MONITOR & SELECTION
+# ============================================================
+
+@app.get("/api/gpus")
+def list_available_gpus():
+    """List all available GPUs with PCI Bus ID, PCIe info, and VRAM."""
+    gpus = _parse_nvidia_smi()
+    
+    # Add assignment info if available
+    assignment = _get_gpu_assignment()
+    tp_slots = assignment.get("tp_slots", [])
+    pp_slots = assignment.get("pp_slots", [])
+    
+    for gpu in gpus:
+        pci_id = gpu["pci_bus_id"]
+        assigned_to = None
+        
+        # Check if this GPU is assigned to any TP slot
+        for i, slot_pci in enumerate(tp_slots):
+            if slot_pci == pci_id:
+                assigned_to = f"TP Slot {i}"
+                break
+        
+        if not assigned_to:
+            for i, slot_pci in enumerate(pp_slots):
+                if slot_pci == pci_id:
+                    assigned_to = f"PP Slot {i}"
+                    break
+        
+        gpu["assigned_to"] = assigned_to
+    
+    return {"gpus": gpus}
+
+@app.get("/api/gpus/monitor")
+def get_gpu_monitor_data():
+    """Get real-time GPU metrics + 24-hour history for charting."""
+    current_gpus = _parse_nvidia_smi()
+    
+    # Record current metrics into ring buffer
+    if current_gpus:
+        _record_gpu_metrics(current_gpus)
+    
+    # Build history payload (only last N points to keep response small)
+    n_points = min(len(gpu_history_buffer["timestamps"]), MAX_HISTORY_POINTS)
+    timestamps = gpu_history_buffer["timestamps"][-n_points:] if n_points > 0 else []
+    
+    history_payload = {
+        "timestamps": [t for t in timestamps],
+        "gpu_vram_used_mb": {},
+        "gpu_temp_c": {},
+        "gpu_fan_pct": {}
+    }
+    
+    for idx, values in gpu_history_buffer["gpu_vram_used_mb"].items():
+        history_payload["gpu_vram_used_mb"][idx] = list(values[-n_points:]) if n_points > 0 else []
+    for idx, values in gpu_history_buffer["gpu_temp_c"].items():
+        history_payload["gpu_temp_c"][idx] = list(values[-n_points:]) if n_points > 0 else []
+    for idx, values in gpu_history_buffer["gpu_fan_pct"].items():
+        history_payload["gpu_fan_pct"][idx] = list(values[-n_points:]) if n_points > 0 else []
+    
+    # Build aggregate stats from current metrics
+    total_vram_mb = sum(g.get("vram_total_mb", 0) for g in current_gpus)
+    used_vram_mb = sum(g.get("vram_used_mb", 0) for g in current_gpus)
+    
+    return {
+        "current": current_gpus,
+        "aggregate": {
+            "total_vram_mb": total_vram_mb,
+            "used_vram_mb": used_vram_mb,
+            "free_vram_mb": total_vram_mb - used_vram_mb
+        },
+        "history": history_payload
+    }
+
+@app.post("/api/gpu/assign")
+def assign_gpus(payload: Dict[str, Any]):
+    """Assign specific GPUs to TP and PP slots."""
+    tp_slots = payload.get("tp_slots", [])
+    pp_slots = payload.get("pp_slots", [])
+    
+    assignment = {
+        "tp_slots": tp_slots,
+        "pp_slots": pp_slots
+    }
+    
+    _save_gpu_assignment(assignment)
+    logger.info(f"GPU assignment saved: TP={tp_slots}, PP={pp_slots}")
+    
+    return {"message": "GPU assignment saved. Will be applied on next container start.", 
+            "tp_slots": tp_slots, "pp_slots": pp_slots}
+
+@app.get("/api/gpu/assignment")
+def get_gpu_assignment():
+    """Return current GPU slot assignments."""
+    assignment = _get_gpu_assignment()
+    return assignment
+
 def stop_vllm_container():
     client = docker.from_env()
     try:

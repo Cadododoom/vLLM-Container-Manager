@@ -415,6 +415,41 @@ header {
     border-color: #10b981;
 }
 
+.btn-warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.btn-warning:hover:not(:disabled) {
+    background: rgba(245, 158, 11, 0.25);
+    border-color: #f59e0b;
+}
+
+.btn-info {
+    background: rgba(6, 182, 212, 0.15);
+    color: #22d3ee;
+    border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.btn-info:hover:not(:disabled) {
+    background: rgba(6, 182, 212, 0.25);
+    border-color: #06b6d4;
+}
+
+/* Paused state — glowing lit-up effect */
+.btn-paused-active {
+    background: rgba(245, 158, 11, 0.3) !important;
+    border-color: #f59e0b !important;
+    box-shadow: 0 0 12px rgba(245, 158, 11, 0.5), inset 0 0 8px rgba(245, 158, 11, 0.3) !important;
+    animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 12px rgba(245, 158, 11, 0.5), inset 0 0 8px rgba(245, 158, 11, 0.3); }
+    50% { box-shadow: 0 0 20px rgba(245, 158, 11, 0.7), inset 0 0 12px rgba(245, 158, 11, 0.5); }
+}
+
 .btn-group {
     display: flex;
     gap: 10px;
@@ -1292,5 +1327,93 @@ input:checked + .slider:before {
     padding-top: 20px;
 }
 
+/* ============================================================
+   GPU MONITOR TAB STYLES
+   ============================================================ */
+
+.gpu-monitor-card {
+    background: rgba(0, 240, 255, 0.02);
+    border: 1px solid rgba(0, 240, 255, 0.1);
+}
+
+.gpu-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.gpu-metric-item {
+    text-align: center;
+    padding: 8px;
+    background: rgba(0, 240, 255, 0.03);
+    border-radius: var(--radius-sm);
+}
+
+/* GPU Selection Dropdowns */
+.gpu-selection-card {
+    background: rgba(52, 211, 153, 0.03);
+    border: 1px solid rgba(52, 211, 153, 0.1);
+}
+
+/* Auto-Tune & Safe Zone */
+.safe-zone-bg {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 24px;
+    background: rgba(52, 211, 153, 0.1);
+    border-left: 2px solid #34d399;
+    border-right: 2px solid #34d399;
+    border-radius: 4px;
+    z-index: 1;
+}
+
+.safe-zone-info {
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: rgba(52, 211, 153, 0.05);
+    border-left: 3px solid #34d399;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+}
+
+/* Help Wizard Overlay */
+#help-wizard-overlay {
+    display: none;
+    position: fixed;
+    bottom: 80px;
+    right: 20px;
+    width: 450px;
+    max-height: 70vh;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 9998;
+}
+
+#help-wizard-overlay.active {
+    display: block !important;
+}
+
+/* Auto-Tune Mode Selector */
+#autotune-mode-view select {
+    width: 100%;
+    padding: 4px 6px;
+    font-size: 11px;
+    background: var(--bg-primary);
+    border-radius: 4px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    #help-wizard-overlay {
+        width: calc(100vw - 40px);
+    }
+    .gpu-metric-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+}
 
 

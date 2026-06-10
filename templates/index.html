@@ -34,6 +34,46 @@
             background-color: rgba(255, 255, 255, 0.25);
             color: #fff;
         }
+
+        /* Collapsible sections for Context Settings */
+        .context-collapsible {
+            margin-bottom: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+        .collapsible-header {
+            background: rgba(0, 240, 255, 0.03);
+            padding: 12px 16px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+            transition: background-color 0.2s ease;
+        }
+        .collapsible-header:hover {
+            background: rgba(0, 240, 255, 0.06);
+        }
+        .context-collapsible[open] .collapsible-body {
+            display: block;
+            animation: collapsibleFadeIn 0.2s ease;
+        }
+        .context-collapsible:not([open]) .collapsible-body {
+            display: none;
+        }
+        @keyframes collapsibleFadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .collapsible-chevron {
+            transition: transform 0.2s ease;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+        .context-collapsible[open] .collapsible-chevron {
+            transform: rotate(180deg);
+        }
     </style>
 </head>
 <body>
@@ -99,6 +139,20 @@
                 </div>
             </div>
             
+            <!-- Auto-Tune Mode Selector -->
+            <div class="vram-quick-view" id="autotune-mode-view">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="display: flex; align-items: center; gap: 4px;">
+                        Auto-Tune VRAM
+                        <button class="info-icon-btn" onclick="event.stopPropagation(); showAutoTuneHelp()" title="How Auto-Tune finds safe memory utilization range">ℹ️</button>
+                    </span>
+                </div>
+                <select id="header-autotune-mode" onchange="onAutotuneModeChanged()" style="width: 100%; padding: 4px 6px; font-size: 11px; background: var(--bg-primary); border-radius: 4px; border: 1px solid var(--border-color); color: var(--text-primary);">
+                    <option value="manual">Manual (Default)</option>
+                    <option value="autotune">🔬 Auto-Tune</option>
+                </select>
+            </div>
+            
             <div class="status-indicator">
                 <div id="status-dot" class="status-dot"></div>
                 <span id="status-text">Checking Status...</span>
@@ -114,6 +168,7 @@
         <button class="tab-btn" onclick="switchTab('benchmark')" id="btn-tab-benchmark">⚡ Benchmark</button>
         <button class="tab-btn" onclick="switchTab('terminal')" id="btn-tab-terminal">🖥️ Terminal</button>
         <button class="tab-btn" onclick="switchTab('github')" id="btn-tab-github">🐙 GitHub / Repos</button>
+        <button class="tab-btn" onclick="switchTab('gpu-monitor')" id="btn-tab-gpu-monitor">🎮 GPU Monitor</button>
     </nav>
 
     <!-- TAB 1: DASHBOARD -->
@@ -145,6 +200,9 @@
                         <button class="btn btn-success btn-sm" onclick="controlContainer('start')" id="btn-server-start">Start Server</button>
                         <button class="btn btn-primary btn-sm" onclick="controlContainer('restart')" id="btn-server-restart">Restart Server</button>
                         <button class="btn btn-danger btn-sm" onclick="controlContainer('stop')" id="btn-server-stop">Stop Server</button>
+                    </div>
+                    <div class="btn-group" style="margin-top: 6px;">
+                        <button class="btn btn-warning btn-sm" onclick="togglePauseLoading()" id="btn-pause-load" disabled title="Toggle model loading pause — change settings freely without automated loading">⏸ Pause Loading</button>
                     </div>
                 </div>
 
@@ -408,6 +466,7 @@
             <!-- Category Sidebar -->
             <div class="config-sidebar">
                 <button class="config-nav-btn active" onclick="switchConfigSection('model')" id="cfg-nav-model">🧠 Model Settings</button>
+                <button class="config-nav-btn" onclick="switchConfigSection('gpu-selection')" id="cfg-nav-gpu-selection">🎮 GPU Selection</button>
                 <button class="config-nav-btn" onclick="switchConfigSection('memory')" id="cfg-nav-memory">💾 Memory & Allocation</button>
                 <button class="config-nav-btn" onclick="switchConfigSection('context')" id="cfg-nav-context">📐 Context Settings</button>
                 <button class="config-nav-btn" onclick="switchConfigSection('sampling')" id="cfg-nav-sampling">🎛️ Sampling & Inference</button>
@@ -475,6 +534,127 @@
                         </div>
                     </div>
 
+                    <!-- SECTION 1.5: GPU SELECTION -->
+                    <div id="cfg-sect-gpu-selection" class="config-section">
+                        <h3 style="margin-bottom: 16px;">🎮 GPU Selection</h3>
+                        <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">
+                            Configure parallelism mode and assign specific GPUs. PCI Bus IDs uniquely identify each GPU even for identical cards.
+                        </p>
+                        
+                        <!-- Parallelism Mode Selector -->
+                        <div style="margin-bottom: 20px; padding: 16px; background: rgba(0, 240, 255, 0.03); border: 1px solid var(--border-color); border-radius: var(--radius-sm);">
+                            <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px;">
+                                <span>🔧</span> Parallelism Mode
+                            </h4>
+                            
+                            <!-- Mode Toggle -->
+                            <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
+                                <button type="button" class="btn btn-sm" id="btn-mode-single" onclick="setGpuMode('single')" style="flex: 1; min-width: 180px; border: 2px solid var(--border-color);">
+                                    🖥️ Single GPU Mode<br><span style="font-size: 10px; opacity: 0.7;">TP=1, PP=1 — One GPU assigned</span>
+                                </button>
+                                <button type="button" class="btn btn-sm" id="btn-mode-multi" onclick="setGpuMode('multi')" style="flex: 1; min-width: 180px; border: 2px solid var(--border-color);">
+                                    🖥️ Multi-GPU Mode<br><span style="font-size: 10px; opacity: 0.7;">TP × PP = Total GPUs</span>
+                                </button>
+                            </div>
+                            
+                            <!-- Single GPU Mode Controls -->
+                            <div id="gpu-mode-single-controls" style="display: none;">
+                                <label style="font-size: 12px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 8px;">
+                                    Assign GPU for Single-Mode Inference
+                                </label>
+                                <select id="gpu-single-select" class="input-control mono" onchange="onGpuSlotChanged()" style="margin-bottom: 12px;">
+                                    <option value="">-- Select a GPU --</option>
+                                </select>
+                                <div style="font-size: 10px; color: var(--text-muted);">
+                                    ℹ️ TP=1, PP=1. The selected GPU handles all model inference.
+                                </div>
+                            </div>
+                            
+                            <!-- Multi-GPU Mode Controls -->
+                            <div id="gpu-mode-multi-controls" style="display: none;">
+                                <!-- Total GPUs Selector -->
+                                <div style="margin-bottom: 12px;">
+                                    <label for="gpu-total-gpus-select" style="font-size: 12px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 6px;">
+                                        Total GPUs to Use
+                                    </label>
+                                    <select id="gpu-total-gpus-select" class="input-control mono" onchange="onTotalGpusChanged()" style="margin-bottom: 12px;">
+                                        <option value="1">1 GPU</option>
+                                        <option value="2">2 GPUs</option>
+                                        <option value="3">3 GPUs</option>
+                                        <option value="4" selected>4 GPUs</option>
+                                        <option value="5">5 GPUs</option>
+                                        <option value="6">6 GPUs</option>
+                                        <option value="7">7 GPUs</option>
+                                        <option value="8">8 GPUs</option>
+                                    </select>
+                                </div>
+                                
+                                <!-- TP/PP Split Selector -->
+                                <div style="margin-bottom: 12px;">
+                                    <label for="gpu-tp-select" style="font-size: 12px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 6px;">
+                                        Tensor Parallel (TP) Size
+                                    </label>
+                                    <select id="gpu-tp-select" class="input-control mono" onchange="onTpPpChanged()" style="margin-bottom: 12px;">
+                                        <!-- Dynamically populated based on total GPUs -->
+                                    </select>
+                                    
+                                    <label for="gpu-pp-select" style="font-size: 12px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 6px; margin-top: 8px;">
+                                        Pipeline Parallel (PP) Size
+                                    </label>
+                                    <select id="gpu-pp-select" class="input-control mono" onchange="onTpPpChanged()" style="margin-bottom: 12px;">
+                                        <!-- Dynamically populated -->
+                                    </select>
+                                    
+                                    <div id="gpu-split-summary" style="font-size: 11px; color: var(--text-secondary); margin-top: 8px; padding: 8px; background: rgba(0, 240, 255, 0.03); border-radius: 4px;">
+                                        <!-- Dynamic summary -->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Available GPUs List -->
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="font-size: 13px; margin-bottom: 8px; color: var(--text-secondary);">Available GPUs in System</h4>
+                            <div id="gpu-selection-available-list" style="display: flex; flex-direction: column; gap: 8px;">
+                                <!-- Dynamic GPU cards will be injected here -->
+                                <div class="card" style="padding: 12px; text-align: center; color: var(--text-muted);">Loading GPUs...</div>
+                            </div>
+                        </div>
+                        
+                        <!-- GPU Assignment Dropdowns (shown in Multi-GPU mode) -->
+                        <div id="gpu-assignment-section" style="display: none;">
+                            <h4 style="font-size: 13px; margin-bottom: 8px; color: var(--text-secondary);">GPU Slot Assignment</h4>
+                            <p style="color: var(--text-muted); font-size: 11px; margin-bottom: 12px;">
+                                Assign specific GPUs to each parallelism slot. Changes applied on next container start.
+                            </p>
+                            
+                            <!-- TP Slot Dropdowns -->
+                            <div id="gpu-tp-slots-container" style="margin-bottom: 16px;">
+                                <label style="font-size: 12px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 8px;">
+                                    Tensor Parallel (TP) Slots
+                                </label>
+                                <div id="gpu-tp-dropdowns" style="display: flex; flex-direction: column; gap: 8px;">
+                                    <!-- Dynamic TP dropdowns injected here -->
+                                </div>
+                            </div>
+                            
+                            <!-- PP Slot Dropdowns (only if PP > 1) -->
+                            <div id="gpu-pp-slots-container" style="margin-top: 16px; display: none;">
+                                <label style="font-size: 12px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 8px;">
+                                    Pipeline Parallel (PP) Slots
+                                </label>
+                                <div id="gpu-pp-dropdowns" style="display: flex; flex-direction: column; gap: 8px;">
+                                    <!-- Dynamic PP dropdowns injected here -->
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Assignment Summary -->
+                        <div id="gpu-assignment-summary" style="margin-top: 16px; padding: 12px; background: rgba(52, 211, 153, 0.05); border-left: 3px solid #34d399; border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary); display: none;">
+                            <strong style="color: #34d399;">Assignment saved.</strong> Will be applied on next container start.
+                        </div>
+                    </div>
+
                     <!-- SECTION 2: MEMORY -->
                     <div id="cfg-sect-memory" class="config-section">
                         <h3 style="margin-bottom: 16px;">Memory & Allocation</h3>
@@ -493,11 +673,30 @@
                         <div class="form-group">
                             <label for="cfg-gpu-memory-utilization">
                                 GPU Memory Utilization
-                                <span class="desc">Hard ceiling for VRAM usage (0.0 to 1.0). Keep at <strong>0.88</strong> for RTX 3080 10GB to fit OS overhead.</span>
+                                <span class="desc">Hard ceiling for VRAM usage (0.0 to 1.0). Run Auto-Tune to get a recommended safe range.</span>
                             </label>
-                            <div class="range-container">
-                                <input type="range" id="cfg-gpu-memory-utilization" class="range-input" min="0.1" max="1.0" step="0.01" oninput="document.getElementById('gpu-val').innerText = this.value">
+                            <div style="position: relative; margin-top: 8px;">
+                                <!-- Safe zone background — only visible after auto-tune -->
+                                <div id="safe-zone-bg" style="position: absolute; top: 50%; transform: translateY(-50%); height: 24px; background: rgba(52, 211, 153, 0.12); border-left: 2px solid #34d399; border-right: 2px solid #34d399; border-radius: 4px; display: none; z-index: 1;"></div>
+                                
+                                <!-- Safe zone labels — only visible after auto-tune -->
+                                <div id="safe-zone-labels" style="position: absolute; top: -20px; width: 100%; display: none; font-size: 9px; color: #34d399; z-index: 2;"></div>
+                                
+                                <!-- Status badge — shows before/after auto-tune -->
+                                <div id="gpu-util-status" style="display: inline-flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 10px;">
+                                    <span id="util-status-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #f59f00; display: inline-block;"></span>
+                                    <span id="util-status-text" style="color: var(--text-muted);">Auto-Tune not yet run — full range (0.1–1.0) available</span>
+                                </div>
+                                
+                                <input type="range" id="cfg-gpu-memory-utilization" class="range-input" min="0.1" max="1.0" step="0.01" oninput="document.getElementById('gpu-val').innerText = this.value; updateSafeZoneVisual()">
                                 <span class="range-value" id="gpu-val">0.88</span>
+                            </div>
+                            
+                            <!-- Safe zone info box — only visible after auto-tune -->
+                            <div id="safe-zone-info" style="margin-top: 8px; padding: 6px 10px; background: rgba(52, 211, 153, 0.05); border-left: 3px solid #34d399; border-radius: var(--radius-sm); font-size: 11px; color: var(--text-secondary); display: none;">
+                                <strong style="color: #34d399;">Safe Range:</strong> 
+                                <span id="safe-range-text">0.65 — 0.89</span> (Auto-Tuned). 
+                                Recommended: <strong id="recommended-val" style="color: #34d399;">0.85</strong>.
                             </div>
                         </div>
                         <div class="form-group">
@@ -626,103 +825,122 @@
                     <!-- SECTION 3: CONTEXT -->
                     <div id="cfg-sect-context" class="config-section">
                         <h3 style="margin-bottom: 16px;">Context Settings</h3>
-                        <div class="form-group">
-                            <label for="cfg-max-model-len">
-                                Max Model Length (Context Window)
-                                <span class="desc">Upper context ceiling (tokens) per agent. Set to 16384 or 32768 for larger file scanning.</span>
-                            </label>
-                            <input type="number" id="cfg-max-model-len" class="input-control">
-                        </div>
-                        <div class="form-group">
-                            <label for="cfg-max-num-batched-tokens">
-                                Max Num Batched Tokens
-                                <span class="desc">Determines prefill batch size. For chunked prefill, match this with Max Model Length.</span>
-                            </label>
-                            <input type="number" id="cfg-max-num-batched-tokens" class="input-control">
-                        </div>
 
-                        <!-- Interactive Capacity Calculator -->
-                        <div class="calculator-box" style="margin-top: 24px; border-top: 1px solid var(--border-color); padding-top: 20px;">
-                            <h4 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; color: var(--accent-cyan);">
-                                <span>📊</span> KV Cache Capacity & Context Allocation Calculator
-                            </h4>
-                            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
-                                Interactively estimate model capacity limits based on VRAM size, cache precision, model size, and layers.
-                            </p>
-                            
-                            <!-- Model parameter inputs -->
-                            <div class="calculator-params-grid" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 16px; border-bottom: 1px dashed rgba(255,255,255,0.07); padding-bottom: 16px;">
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label for="calc-layers" style="font-size: 11px;">Layers</label>
-                                    <input type="number" id="calc-layers" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="32" oninput="recalculateContext()">
+                        <!-- Collapsible 1: Context Window (collapsed by default) -->
+                        <details class="context-collapsible" open style="margin-bottom: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden;">
+                            <summary class="collapsible-header" style="background: rgba(0, 240, 255, 0.03); padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none;">
+                                <span style="font-size: 13px; font-weight: 600; color: var(--accent-cyan);">📏 Context Window</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button type="button" class="info-icon-btn" onclick="event.preventDefault(); event.stopPropagation(); showContextHelp()" title="What is context window size?">ℹ️</button>
+                                    <span class="collapsible-chevron" style="transition: transform 0.2s ease; font-size: 10px;">▼</span>
                                 </div>
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label for="calc-kv-heads" style="font-size: 11px;">KV Heads</label>
-                                    <input type="number" id="calc-kv-heads" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="8" oninput="recalculateContext()">
+                            </summary>
+                            <div class="collapsible-body" style="padding: 16px; border-top: 1px solid var(--border-color);">
+                                <div class="form-group">
+                                    <label for="cfg-max-model-len">
+                                        Max Model Length (Context Window)
+                                        <span class="desc">Upper context ceiling (tokens) per agent. Set to 16384 or 32768 for larger file scanning.</span>
+                                    </label>
+                                    <input type="number" id="cfg-max-model-len" class="input-control">
                                 </div>
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label for="calc-head-dim" style="font-size: 11px;">Head Dim</label>
-                                    <input type="number" id="calc-head-dim" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="128" oninput="recalculateContext()">
-                                </div>
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label for="calc-weight-size" style="font-size: 11px;">Weights (GB)</label>
-                                    <input type="number" id="calc-weight-size" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="4.0" step="0.1" oninput="recalculateContext()">
-                                </div>
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label for="calc-vram" style="font-size: 11px;">Total VRAM (GB)</label>
-                                    <input type="number" id="calc-vram" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="10.00" step="0.1" oninput="recalculateContext()">
+                                <div class="form-group">
+                                    <label for="cfg-max-num-batched-tokens">
+                                        Max Num Batched Tokens
+                                        <span class="desc">Determines prefill batch size. For chunked prefill, match this with Max Model Length.</span>
+                                    </label>
+                                    <input type="number" id="cfg-max-num-batched-tokens" class="input-control">
                                 </div>
                             </div>
+                        </details>
 
-                            <!-- Calculator ranges/parameters -->
-                            <div class="calculator-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 16px;">
-                                <div style="display: flex; flex-direction: column; gap: 16px;">
+                        <!-- Collapsible 2: KV Cache Calculator (expanded by default) -->
+                        <details class="context-collapsible" open style="margin-bottom: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden;">
+                            <summary class="collapsible-header" style="background: rgba(0, 240, 255, 0.03); padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none;">
+                                <span style="font-size: 13px; font-weight: 600; color: var(--accent-cyan);">📊 KV Cache Capacity & Context Calculator</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button type="button" class="info-icon-btn" onclick="event.preventDefault(); event.stopPropagation(); showCalculatorHelp()" title="How does the KV cache calculator work?">ℹ️</button>
+                                    <span class="collapsible-chevron" style="transition: transform 0.2s ease; font-size: 10px;">▼</span>
+                                </div>
+                            </summary>
+                            <div class="collapsible-body" style="padding: 16px; border-top: 1px solid var(--border-color);">
+                                <!-- Interactive Capacity Calculator -->
+                                <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
+                                    Interactively estimate model capacity limits based on VRAM size, cache precision, model size, and layers.
+                                </p>
+
+                                <!-- Model parameter inputs -->
+                                <div class="calculator-params-grid" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 16px; border-bottom: 1px dashed rgba(255,255,255,0.07); padding-bottom: 16px;">
                                     <div class="form-group" style="margin-bottom: 0;">
-                                        <label for="calc-gpu-util" style="font-size: 11px;">GPU Utilization Ceiling</label>
-                                        <input type="number" id="calc-gpu-util" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="0.88" step="0.01" oninput="recalculateContext()">
+                                        <label for="calc-layers" style="font-size: 11px;">Layers</label>
+                                        <input type="number" id="calc-layers" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="32" oninput="recalculateContext()">
                                     </div>
                                     <div class="form-group" style="margin-bottom: 0;">
-                                        <label for="calc-precision" style="font-size: 11px;">KV Precision</label>
-                                        <select id="calc-precision" class="input-control" style="padding: 6px 10px; font-size: 12px;" onchange="recalculateContext()">
-                                            <option value="auto">auto (standard)</option>
-                                            <option value="fp8">fp8 (VRAM Optimized)</option>
-                                        </select>
+                                        <label for="calc-kv-heads" style="font-size: 11px;">KV Heads</label>
+                                        <input type="number" id="calc-kv-heads" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="8" oninput="recalculateContext()">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="calc-head-dim" style="font-size: 11px;">Head Dim</label>
+                                        <input type="number" id="calc-head-dim" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="128" oninput="recalculateContext()">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="calc-weight-size" style="font-size: 11px;">Weights (GB)</label>
+                                        <input type="number" id="calc-weight-size" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="4.0" step="0.1" oninput="recalculateContext()">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="calc-vram" style="font-size: 11px;">Total VRAM (GB)</label>
+                                        <input type="number" id="calc-vram" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="10.00" step="0.1" oninput="recalculateContext()">
                                     </div>
                                 </div>
-                                <div style="display: flex; flex-direction: column; justify-content: center; background: rgba(0, 240, 255, 0.02); padding: 12px; border-radius: 6px; border: 1px solid rgba(0,240,255,0.05); text-align: center;">
-                                    <span style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Estimated Token Pool</span>
-                                    <span id="calc-context-pool" style="font-size: 20px; font-weight: bold; color: var(--accent-cyan); margin: 6px 0;">0 Tokens</span>
-                                    <span style="font-size: 10px; color: var(--text-muted);">Calculated based on VRAM capacity rules.</span>
-                                </div>
-                            </div>
 
-                            <div class="calculator-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 16px; border-top: 1px dashed rgba(255,255,255,0.07); padding-top: 16px;">
-                                <div style="display: flex; flex-direction: column; gap: 16px;">
-                                    <div class="form-group" style="margin-bottom: 0;">
-                                        <label for="calc-agent-context">
-                                            Agent Context Length
-                                            <span class="desc">Compute seats for a given agent context length.</span>
-                                        </label>
-                                        <div class="range-container">
-                                            <input type="range" id="calc-agent-context" class="range-input" min="1024" max="131072" step="1024" value="16384" oninput="adjustCalculatorSliders('context')">
-                                            <span class="range-value" id="calc-agent-context-val" style="min-width: 75px;">16,384</span>
+                                <!-- Calculator ranges/parameters -->
+                                <div class="calculator-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 16px;">
+                                    <div style="display: flex; flex-direction: column; gap: 16px;">
+                                        <div class="form-group" style="margin-bottom: 0;">
+                                            <label for="calc-gpu-util" style="font-size: 11px;">GPU Utilization Ceiling</label>
+                                            <input type="number" id="calc-gpu-util" class="input-control mono" style="padding: 6px 10px; font-size: 12px;" value="0.88" step="0.01" oninput="recalculateContext()">
+                                        </div>
+                                        <div class="form-group" style="margin-bottom: 0;">
+                                            <label for="calc-precision" style="font-size: 11px;">KV Precision</label>
+                                            <select id="calc-precision" class="input-control" style="padding: 6px 10px; font-size: 12px;" onchange="recalculateContext()">
+                                                <option value="auto">auto (standard)</option>
+                                                <option value="fp8">fp8 (VRAM Optimized)</option>
+                                            </select>
                                         </div>
                                     </div>
-                                    <div class="form-group" style="margin-bottom: 0;">
-                                        <label for="calc-target-seats">
-                                            Target Concurrency Seats
-                                            <span class="desc">Compute context per agent for a given seat count.</span>
-                                        </label>
-                                        <div class="range-container">
-                                            <input type="range" id="calc-target-seats" class="range-input" min="1" max="128" step="1" value="8" oninput="adjustCalculatorSliders('seats')">
-                                            <span class="range-value" id="calc-target-seats-val" style="min-width: 30px;">8</span>
-                                        </div>
+                                    <div style="display: flex; flex-direction: column; justify-content: center; background: rgba(0, 240, 255, 0.02); padding: 12px; border-radius: 6px; border: 1px solid rgba(0,240,255,0.05); text-align: center;">
+                                        <span style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Estimated Token Pool</span>
+                                        <span id="calc-context-pool" style="font-size: 20px; font-weight: bold; color: var(--accent-cyan); margin: 6px 0;">0 Tokens</span>
+                                        <span style="font-size: 10px; color: var(--text-muted);">Calculated based on VRAM capacity rules.</span>
                                     </div>
                                 </div>
-                                
-                                <div style="display: flex; flex-direction: column; gap: 8px;">
-                                    <div style="background: rgba(255,255,255,0.02); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
-                                        <span style="font-size: 12px; color: var(--text-secondary);">Max Seats:</span>
+
+                                <div class="calculator-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 16px; border-top: 1px dashed rgba(255,255,255,0.07); padding-top: 16px;">
+                                    <div style="display: flex; flex-direction: column; gap: 16px;">
+                                        <div class="form-group" style="margin-bottom: 0;">
+                                            <label for="calc-agent-context">
+                                                Agent Context Length
+                                                <span class="desc">Compute seats for a given agent context length.</span>
+                                            </label>
+                                            <div class="range-container">
+                                                <input type="range" id="calc-agent-context" class="range-input" min="1024" max="131072" step="1024" value="16384" oninput="adjustCalculatorSliders('context')">
+                                                <span class="range-value" id="calc-agent-context-val" style="min-width: 75px;">16,384</span>
+                                            </div>
+                                        </div>
+                                        <div class="form-group" style="margin-bottom: 0;">
+                                            <label for="calc-target-seats">
+                                                Target Concurrency Seats
+                                                <span class="desc">Compute context per agent for a given seat count.</span>
+                                            </label>
+                                            <div class="range-container">
+                                                <input type="range" id="calc-target-seats" class="range-input" min="1" max="128" step="1" value="8" oninput="adjustCalculatorSliders('seats')">
+                                                <span class="range-value" id="calc-target-seats-val" style="min-width: 30px;">8</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                                        <div style="background: rgba(255,255,255,0.02); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
+                                            <span style="font-size: 12px; color: var(--text-secondary);">Max Seats:</span>
                                         <span id="calc-result-seats" style="font-weight: bold; color: var(--accent-cyan); font-family: var(--font-mono);">0 Agents</span>
                                     </div>
                                     <div style="background: rgba(255,255,255,0.02); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
@@ -1096,6 +1314,72 @@
                 <div class="viewer-container">
                     <div class="viewer-header" id="viewer-header-info">Select a file from the repository tree to view content.</div>
                     <div class="viewer-content" id="viewer-content-body"></div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- TAB 7: GPU MONITOR -->
+    <main id="tab-gpu-monitor" class="tab-panel">
+        <div style="display: flex; flex-direction: column; gap: 24px;">
+            <!-- Real-time GPU Cards Grid -->
+            <div class="grid-2" id="gpu-cards-container">
+                <!-- Dynamic GPU cards will be injected here -->
+                <div class="card" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                    Loading GPU data...
+                </div>
+            </div>
+
+            <!-- Aggregate Stats + Chart -->
+            <div class="grid-2">
+                <!-- Aggregate Stats Card -->
+                <div class="card" id="gpu-aggregate-card">
+                    <div class="card-title">Aggregate Statistics</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div>
+                            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">Total VRAM</div>
+                            <div id="gpu-total-vram" class="stat-value mono" style="font-size: 18px;">-- / -- GB</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">Used VRAM</div>
+                            <div id="gpu-used-vram" class="stat-value mono" style="font-size: 18px; color: var(--accent-purple);">-- / -- GB</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">Free VRAM</div>
+                            <div id="gpu-free-vram" class="stat-value mono" style="font-size: 18px; color: #34d399;">-- GB</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">Avg Temperature</div>
+                            <div id="gpu-avg-temp" class="stat-value mono" style="font-size: 18px; color: #f59f00;">--°C</div>
+                        </div>
+                    </div>
+                    
+                    <!-- VRAM Usage Bar -->
+                    <div style="margin-top: 20px;">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 6px; color: var(--text-secondary);">
+                            <span>VRAM Utilization</span>
+                            <span id="gpu-vram-pct" class="mono">--%</span>
+                        </div>
+                        <div style="display: flex; height: 12px; width: 100%; border-radius: 6px; overflow: hidden; background: rgba(255,255,255,0.05);">
+                            <div id="gpu-vram-fill" style="height: 100%; width: 0%; background: linear-gradient(90deg, #4c6ef5, #9d4edd); transition: width 0.5s;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 24-Hour Chart -->
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <div class="card-title" style="margin: 0;">🕐 24-Hour History</div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <label style="font-size: 11px; color: var(--text-muted);">Layers:</label>
+                            <label style="font-size: 11px;"><input type="checkbox" id="chart-layer-vram0" checked onchange="updateGpuChart()"> GPU0 VRAM</label>
+                            <label style="font-size: 11px;"><input type="checkbox" id="chart-layer-vram1" checked onchange="updateGpuChart()"> GPU1 VRAM</label>
+                            <label style="font-size: 11px;"><input type="checkbox" id="chart-layer-temp" checked onchange="updateGpuChart()"> Temp</label>
+                        </div>
+                    </div>
+                    <div style="position: relative; height: 300px;">
+                        <canvas id="gpuHistoryChart"></canvas>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1533,7 +1817,13 @@
     // STATUS POLLING
     function startStatusPolling() {
         fetchStatus();
+        checkPauseStatus();
         statusInterval = setInterval(fetchStatus, 2000);
+        
+        // Check pause status periodically to sync with server state
+        setTimeout(() => {
+            setInterval(checkPauseStatus, 10000);
+        }, 0);
     }
 
     function fetchStatus() {
@@ -1834,6 +2124,12 @@
         document.getElementById('btn-server-stop').disabled = data.container_status === "exited" || data.container_status === "not_found";
         document.getElementById('btn-server-restart').disabled = data.container_status === "not_found";
 
+        // Pause/Resume Loading button — always enabled when container exists (persistent across restarts)
+        const pauseBtn = document.getElementById('btn-pause-load');
+        if (pauseBtn) {
+            pauseBtn.disabled = data.container_status === 'not_found';
+        }
+
         // Sync Multi-Agent Planner with runtime status metrics
         const maxStable = (data.last_verified_context && data.last_verified_context.model === data.active_model) ? data.last_verified_context.max_stable_length : 0;
         const actualCapacity = data.actual_kv_cache_capacity || ((data.num_gpu_blocks || 0) * (data.block_size || 0));
@@ -2022,6 +2318,87 @@
                     closeLoadingOverlay();
                 }
                 fetchStatus();
+            });
+    }
+
+    // GPU PAUSE/RESUME — persistent toggle that survives container restarts
+    let isPaused = false;
+
+    function updatePauseButton() {
+        const btn = document.getElementById('btn-pause-load');
+        if (!btn) return;
+        
+        if (isPaused) {
+            btn.innerText = '▶ Resume Loading';
+            btn.title = 'Resume model loading — will reload models on next start';
+            btn.classList.add('btn-paused-active');
+        } else {
+            btn.innerText = '⏸ Pause Loading';
+            btn.title = 'Pause model loading to change settings freely without automated loading';
+            btn.classList.remove('btn-paused-active');
+        }
+    }
+
+    async function checkPauseStatus() {
+        try {
+            const resp = await fetch('/api/container/pause/status');
+            const data = await resp.json();
+            isPaused = data.paused;
+            updatePauseButton();
+            
+            // Enable/disable button based on whether container exists
+            const statusResp = await fetch('/api/status');
+            const statusData = await statusResp.json();
+            document.getElementById('btn-pause-load').disabled = 
+                statusData.container_status === 'not_found';
+        } catch (err) {
+            console.error('Failed to check pause status:', err);
+        }
+    }
+
+    function togglePauseLoading() {
+        const btn = document.getElementById('btn-pause-load');
+        if (btn.disabled) return;
+        
+        btn.disabled = true;
+        const loadingText = isPaused ? 'Resuming...' : 'Pausing...';
+        showToast(loadingText, 'info');
+        
+        fetch('/api/container/pause', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                isPaused = data.paused;
+                updatePauseButton();
+                showToast(data.message, isPaused ? 'warning' : 'success');
+                
+                // Re-check status to re-enable button appropriately
+                setTimeout(() => checkPauseStatus(), 1000);
+            })
+            .catch(err => {
+                showToast("Failed: " + err, 'error');
+                btn.disabled = false;
+            });
+    }
+
+    function resumeModelLoading() {
+        const btn = document.getElementById('btn-resume-load');
+        if (btn.disabled) return;
+        
+        btn.disabled = true;
+        showToast('Resuming...', 'info');
+        
+        fetch('/api/container/resume', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                isPaused = false;
+                updatePauseButton();
+                showToast(data.message, 'success');
+                
+                setTimeout(() => checkPauseStatus(), 1000);
+            })
+            .catch(err => {
+                showToast("Failed to resume: " + err, 'error');
+                btn.disabled = false;
             });
     }
 
@@ -3060,6 +3437,426 @@
 
         validateParallelismInputs();
     }
+
+    // ============================================================
+    // GPU SELECTION DROPDOWNS
+    // ============================================================
+    let availableGpuData = [];
+    let currentGpuMode = 'single'; // 'single' or 'multi'
+    
+    function loadAvailableGpus() {
+        fetch('/api/gpus')
+            .then(res => res.json())
+            .then(data => {
+                availableGpuData = data.gpus || [];
+                renderAvailableGpuList();
+                
+                // Store detected count for parallelism validation
+                detectedGpuCount = availableGpuData.length;
+                if (detectedGpuCount > 0) {
+                    const gpuInfoBox = document.getElementById('gpu-info-box');
+                    if (gpuInfoBox) {
+                        gpuInfoBox.style.display = 'block';
+                        const badge = document.getElementById('gpu-count-badge');
+                        if (badge) badge.innerText = availableGpuData.length;
+                        
+                        // Render GPU list in Memory section too
+                        renderGpuListInMemorySection();
+                    }
+                }
+                
+                // Refresh all GPU-related UI after loading GPUs
+                refreshGpuSelectionUI();
+            })
+            .catch(err => console.error('Failed to load GPUs:', err));
+    }
+    
+    function refreshGpuSelectionUI() {
+        // Update single-GPU mode dropdown options
+        const singleSelect = document.getElementById('gpu-single-select');
+        if (singleSelect) {
+            let opts = '<option value="">-- Select a GPU --</option>';
+            for (const gpu of availableGpuData) {
+                opts += `<option value="${gpu.pci_bus_id}">🎮 GPU ${gpu.index} (${gpu.pci_bus_id}) — ${(gpu.vram_mb / 1024).toFixed(1)} GB</option>`;
+            }
+            singleSelect.innerHTML = opts;
+        }
+        
+        // Update multi-GPU mode TP/PP selectors based on available GPUs
+        updateTpPpSelectors();
+        
+        // Refresh slot dropdowns if in multi mode
+        if (currentGpuMode === 'multi') {
+            renderMultiGpuSlots();
+        }
+    }
+    
+    function setGpuMode(mode) {
+        currentGpuMode = mode;
+        
+        const singleBtn = document.getElementById('btn-mode-single');
+        const multiBtn = document.getElementById('btn-mode-multi');
+        const singleControls = document.getElementById('gpu-mode-single-controls');
+        const multiControls = document.getElementById('gpu-mode-multi-controls');
+        const assignmentSection = document.getElementById('gpu-assignment-section');
+        
+        if (mode === 'single') {
+            currentGpuMode = 'single';
+            singleBtn.style.borderColor = '#34d399';
+            singleBtn.style.background = 'rgba(52, 211, 153, 0.08)';
+            multiBtn.style.borderColor = 'var(--border-color)';
+            multiBtn.style.background = '';
+            
+            if (singleControls) singleControls.style.display = 'block';
+            if (multiControls) multiControls.style.display = 'none';
+            if (assignmentSection) assignmentSection.style.display = 'none';
+            
+            // Sync config values
+            syncConfigFromGpuMode(1, 1);
+        } else {
+            currentGpuMode = 'multi';
+            multiBtn.style.borderColor = '#34d399';
+            multiBtn.style.background = 'rgba(52, 211, 153, 0.08)';
+            singleBtn.style.borderColor = 'var(--border-color)';
+            singleBtn.style.background = '';
+            
+            if (singleControls) singleControls.style.display = 'none';
+            if (multiControls) multiControls.style.display = 'block';
+            if (assignmentSection) assignmentSection.style.display = 'block';
+            
+            updateTpPpSelectors();
+            renderMultiGpuSlots();
+        }
+    }
+    
+    function updateTpPpSelectors() {
+        const totalSelect = document.getElementById('gpu-total-gpus-select');
+        const tpSelect = document.getElementById('gpu-tp-select');
+        const ppSelect = document.getElementById('gpu-pp-select');
+        
+        if (!totalSelect || !tpSelect || !ppSelect) return;
+        
+        const totalGpus = parseInt(totalSelect.value);
+        const availableCount = availableGpuData.length;
+        const effectiveTotal = Math.min(totalGpus, availableCount);
+        
+        // TP can be any divisor of effectiveTotal (1 to effectiveTotal)
+        let tpOpts = '';
+        for (let i = 1; i <= effectiveTotal; i++) {
+            if (effectiveTotal % i === 0) {
+                const ppVal = effectiveTotal / i;
+                tpOpts += `<option value="${i}">TP=${i}, PP=${ppVal}</option>`;
+            }
+        }
+        tpSelect.innerHTML = tpOpts || '<option value="1">TP=1</option>';
+        
+        // PP is derived from TP selection
+        updatePpOptions();
+    }
+    
+    function updatePpOptions() {
+        const tpSelect = document.getElementById('gpu-tp-select');
+        const ppSelect = document.getElementById('gpu-pp-select');
+        const totalSelect = document.getElementById('gpu-total-gpus-select');
+        
+        if (!tpSelect || !ppSelect || !totalSelect) return;
+        
+        const totalGpus = parseInt(totalSelect.value);
+        const availableCount = availableGpuData.length;
+        const effectiveTotal = Math.min(totalGpus, availableCount);
+        const tpVal = parseInt(tpSelect.value) || 1;
+        const ppVal = effectiveTotal / tpVal;
+        
+        // PP is fixed by the TP selection (must equal total/TP)
+        ppSelect.innerHTML = `<option value="${ppVal}" selected>PP=${ppVal}</option>`;
+        
+        // Update summary
+        updateSplitSummary(tpVal, ppVal);
+    }
+    
+    function updateSplitSummary(tpVal, ppVal) {
+        const summaryEl = document.getElementById('gpu-split-summary');
+        if (!summaryEl) return;
+        
+        const totalGpus = tpVal * ppVal;
+        let nvlinkHint = '';
+        if (totalGpus > 1 && availableGpuData.length >= 2) {
+            // Check if GPUs appear to be NVLink-connected (same model, close indices)
+            const sameModel = availableGpuData.every(g => g.name === availableGpuData[0].name);
+            if (sameModel && totalGpus <= 4) {
+                nvlinkHint = ' 💡 High-bandwidth NVLink recommended for TP=' + totalGpus;
+            }
+        }
+        
+        summaryEl.innerHTML = `
+            <strong>Configuration:</strong> ${tpVal} GPU(s) × Tensor Parallel (TP=${totalGpus}) 
+            &nbsp;|&nbsp; PP=${1} (no pipeline parallelism)<br>
+            <span style="color: var(--text-muted); font-size: 10px;">
+                Total GPUs needed: ${totalGpus} | Available: ${availableGpuData.length} GPU(s)${nvlinkHint ? '<br>' + nvlinkHint : ''}
+            </span>
+        `;
+    }
+    
+    function renderMultiGpuSlots() {
+        const totalSelect = document.getElementById('gpu-total-gpus-select');
+        const tpSelect = document.getElementById('gpu-tp-select');
+        
+        if (!totalSelect || !tpSelect) return;
+        
+        const totalGpus = parseInt(totalSelect.value);
+        const availableCount = availableGpuData.length;
+        const effectiveTotal = Math.min(totalGpus, availableCount);
+        const tpVal = parseInt(tpSelect.value) || 1;
+        const ppVal = effectiveTotal / tpVal;
+        
+        // Render TP slot dropdowns
+        const tpContainer = document.getElementById('gpu-tp-dropdowns');
+        if (tpContainer) {
+            let tpHtml = '';
+            for (let i = 0; i < tpVal; i++) {
+                tpHtml += renderGpuDropdown(`tp-slot-${i}`, `TP Slot ${i}`);
+            }
+            tpContainer.innerHTML = tpHtml || '<div class="card" style="padding: 12px; text-align: center; color: var(--text-muted);">No TP slots</div>';
+        }
+        
+        // Render PP slot dropdowns (only if PP > 1)
+        const ppContainer = document.getElementById('gpu-pp-dropdowns');
+        const ppSection = document.getElementById('gpu-pp-slots-container');
+        if (ppSection && ppVal > 1) {
+            ppSection.style.display = 'block';
+            let ppHtml = '';
+            for (let i = 0; i < ppVal; i++) {
+                ppHtml += renderGpuDropdown(`pp-slot-${i}`, `PP Slot ${i}`);
+            }
+            if (ppContainer) ppContainer.innerHTML = ppHtml;
+        } else if (ppSection && ppVal <= 1) {
+            ppSection.style.display = 'none';
+        }
+    }
+    
+    function renderGpuDropdown(selectId, label) {
+        let optionsHtml = '<option value="">-- Select GPU --</option>';
+        for (const gpu of availableGpuData) {
+            optionsHtml += `<option value="${gpu.pci_bus_id}">🎮 GPU ${gpu.index} (${gpu.pci_bus_id}) — ${(gpu.vram_mb / 1024).toFixed(1)} GB</option>`;
+        }
+        
+        return `
+            <div class="card" style="padding: 10px 12px;">
+                <label style="font-size: 11px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 4px;">${label}</label>
+                <select id="${selectId}" class="input-control mono" onchange="onGpuSlotChanged()" style="font-size: 11px; padding: 6px 8px;">
+                    ${optionsHtml}
+                </select>
+            </div>`;
+    }
+    
+    function onTotalGpusChanged() {
+        if (currentGpuMode === 'multi') {
+            updateTpPpSelectors();
+            renderMultiGpuSlots();
+        }
+    }
+    
+    function onTpPpChanged() {
+        if (currentGpuMode === 'multi') {
+            updatePpOptions();
+            renderMultiGpuSlots();
+        }
+    }
+    
+    function onGpuSlotChanged() {
+        saveGpuAssignment();
+    }
+    
+    function syncConfigFromGpuMode(tpVal, ppVal) {
+        const tpInput = document.getElementById('cfg-tensor-parallel-size');
+        const ppInput = document.getElementById('cfg-pipeline-parallel-size');
+        if (tpInput) tpInput.value = tpVal;
+        if (ppInput) ppInput.value = ppVal;
+    }
+    
+    function saveGpuAssignment() {
+        let tpSlots = [];
+        let ppSlots = [];
+        
+        if (currentGpuMode === 'single') {
+            // Single mode: get from single-select dropdown
+            const singleSel = document.getElementById('gpu-single-select');
+            if (singleSel && singleSel.value) {
+                tpSlots.push(singleSel.value);
+            }
+            syncConfigFromGpuMode(1, 1);
+        } else {
+            // Multi mode: get from TP/PP slot dropdowns
+            const totalSelect = document.getElementById('gpu-total-gpus-select');
+            const tpSelect = document.getElementById('gpu-tp-select');
+            
+            if (totalSelect && tpSelect) {
+                const effectiveTotal = Math.min(parseInt(totalSelect.value), availableGpuData.length);
+                const tpVal = parseInt(tpSelect.value) || 1;
+                const ppVal = effectiveTotal / tpVal;
+                
+                for (let i = 0; i < tpVal; i++) {
+                    const sel = document.getElementById(`tp-slot-${i}`);
+                    if (sel && sel.value) tpSlots.push(sel.value);
+                }
+                
+                for (let i = 0; i < ppVal; i++) {
+                    const sel = document.getElementById(`pp-slot-${i}`);
+                    if (sel && sel.value) ppSlots.push(sel.value);
+                }
+                
+                syncConfigFromGpuMode(tpVal, ppVal);
+            }
+        }
+        
+        // Save to backend
+        fetch('/api/gpu/assign', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tp_slots: tpSlots, pp_slots: ppSlots })
+        })
+        .then(res => res.json())
+        .then(data => {
+            const summary = document.getElementById('gpu-assignment-summary');
+            if (summary) {
+                summary.style.display = 'block';
+                setTimeout(() => { summary.style.display = 'none'; }, 5000);
+            }
+        })
+        .catch(err => console.error('Failed to save GPU assignment:', err));
+    }
+    
+    function renderAvailableGpuList() {
+        const container = document.getElementById('gpu-selection-available-list');
+        if (!container || !availableGpuData.length) return;
+        
+        let html = '';
+        for (const gpu of availableGpuData) {
+            html += `
+                <div class="card" style="padding: 10px 12px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong style="font-size: 12px;">🎮 GPU ${gpu.index} — ${gpu.name}</strong><br>
+                        <span style="font-size: 11px; color: var(--text-muted);">PCI: ${gpu.pci_bus_id} | UUID: ${gpu.uuid.substring(0, 20)}...</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-size: 12px; font-weight: 500;">${(gpu.vram_mb / 1024).toFixed(1)} GB</div>
+                        <div style="font-size: 10px; color: var(--text-muted);">PCIe Gen${gpu.pcie_gen || '?'} x${gpu.pcie_width_max || '?'}</span></div>
+                    </div>
+                </div>`;
+        }
+        container.innerHTML = html;
+    }
+    
+    function renderGpuListInMemorySection() {
+        const listEl = document.getElementById('gpu-list');
+        if (!listEl || !availableGpuData.length) return;
+        
+        let html = '';
+        for (const gpu of availableGpuData) {
+            html += `<div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                <span>GPU ${gpu.index}: ${gpu.name}</span>
+                <span class="mono" style="font-size: 10px;">${gpu.pci_bus_id}</span>
+            </div>`;
+        }
+        listEl.innerHTML = html;
+    }
+    
+    function updateGpuSelectionDropdowns() {
+        const tpContainer = document.getElementById('gpu-tp-dropdowns');
+        const ppContainer = document.getElementById('gpu-pp-dropdowns');
+        
+        if (!tpContainer || !ppContainer) return;
+        
+        const tpSize = parseInt(document.getElementById('cfg-tensor-parallel-size').value) || 1;
+        const ppSize = parseInt(document.getElementById('cfg-pipeline-parallel-size').value) || 1;
+        
+        // Render TP dropdowns
+        let tpHtml = '';
+        for (let i = 0; i < tpSize; i++) {
+            tpHtml += renderGpuDropdown(`tp-slot-${i}`, `TP Slot ${i}`);
+        }
+        if (!tpHtml) tpHtml = '<div class="card" style="padding: 12px; text-align: center; color: var(--text-muted);">No TP slots</span></div>';
+        tpContainer.innerHTML = tpHtml;
+        
+        // Render PP dropdowns
+        let ppHtml = '';
+        for (let i = 0; i < ppSize; i++) {
+            ppHtml += renderGpuDropdown(`pp-slot-${i}`, `PP Slot ${i}`);
+        }
+        if (!ppHtml) ppHtml = '<div class="card" style="padding: 12px; text-align: center; color: var(--text-muted);">No PP slots</span></div>';
+        ppContainer.innerHTML = ppHtml;
+    }
+    
+    function renderGpuDropdown(selectId, label) {
+        let optionsHtml = '<option value="">-- Select GPU --</option>';
+        for (const gpu of availableGpuData) {
+            const selected = ''; // Will be set dynamically if needed
+            optionsHtml += `<option value="${gpu.pci_bus_id}" ${selected}>🎮 GPU ${gpu.index} (${gpu.pci_bus_id}) — ${(gpu.vram_mb / 1024).toFixed(1)} GB</span></option>`;
+        }
+        
+        return `
+            <div class="card" style="padding: 10px 12px;">
+                <label style="font-size: 11px; font-weight: 500; color: var(--text-secondary); display: block; margin-bottom: 4px;">${label}</span></label>
+                <select id="${selectId}" class="input-control mono" onchange="onGpuSlotChanged()" style="font-size: 11px; padding: 6px 8px;">
+                    ${optionsHtml}
+                </select>
+            </div>`;
+    }
+    
+    function onGpuSlotChanged() {
+        // Save assignment when any slot changes
+        saveGpuAssignment();
+    }
+    
+    function saveGpuAssignment() {
+        const tpSize = parseInt(document.getElementById('cfg-tensor-parallel-size').value) || 1;
+        const ppSize = parseInt(document.getElementById('cfg-pipeline-parallel-size').value) || 1;
+        
+        const tpSlots = [];
+        for (let i = 0; i < tpSize; i++) {
+            const sel = document.getElementById(`tp-slot-${i}`);
+            if (sel && sel.value) tpSlots.push(sel.value);
+        }
+        
+        const ppSlots = [];
+        for (let i = 0; i < ppSize; i++) {
+            const sel = document.getElementById(`pp-slot-${i}`);
+            if (sel && sel.value) ppSlots.push(sel.value);
+        }
+        
+        // Save to backend
+        fetch('/api/gpu/assign', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tp_slots: tpSlots, pp_slots: ppSlots })
+        })
+        .then(res => res.json())
+        .then(data => {
+            const summary = document.getElementById('gpu-assignment-summary');
+            if (summary) {
+                summary.style.display = 'block';
+                setTimeout(() => { summary.style.display = 'none'; }, 5000);
+            }
+        })
+        .catch(err => console.error('Failed to save GPU assignment:', err));
+    }
+
+    // Load GPUs on page load and when switching to config tab
+    window.addEventListener('load', function() {
+        loadAvailableGpus();
+        
+        // Reload GPUs when switching to config tab
+        const origSwitchTab = window.switchTab;
+        if (origSwitchTab) {
+            window.switchTab = function(tabId) {
+                origSwitchTab(tabId);
+                if (tabId === 'config') {
+                    loadAvailableGpus();
+                }
+            };
+        }
+    });
+
 
     // Auto-Suggest speculative decoding draft model
     function autoSuggestDraftModel() {
@@ -4515,6 +5312,12 @@ main();`;
                         document.getElementById('cfg-gpu-memory-utilization').value = data.stable_value;
                         document.getElementById('gpu-val').innerText = data.stable_value;
                         syncMainToCalculator();
+                        // Activate safe zone highlighting now that auto-tune is done
+                        if (data.safe_min !== undefined && data.safe_max !== undefined) {
+                            completeAutoTune(data.safe_min, data.safe_max, data.stable_value);
+                        } else {
+                            completeAutoTune((data.stable_value - 0.1).toFixed(2), data.stable_value.toFixed(2), data.stable_value);
+                        }
                     } else if (data.status === 'failed') {
                         document.getElementById('autotune-step-label').innerText = `Failed: ${data.error || 'Diagnostic aborted'}`;
                     }
@@ -4981,6 +5784,663 @@ main();`;
         </div>
     </div>
 </div>
+
+<!-- GPU Monitor JavaScript -->
+<script>
+let gpuHistoryChart = null;
+const gpuMonitorRefreshInterval = 2000; // 2 seconds
+let gpuMonitorPollTimeout = null;
+
+// Initialize GPU Monitor tab on page load
+function initGpuMonitor() {
+    pollGpuData();
+    gpuMonitorPollTimeout = setTimeout(function() { initGpuMonitor(); }, gpuMonitorRefreshInterval);
+}
+
+function pollGpuData() {
+    fetch('/api/gpus/monitor')
+        .then(res => res.json())
+        .then(data => {
+            renderGpuCards(data.current);
+            updateAggregateStats(data.aggregate, data.current);
+            updateGpuChart();
+            
+            // Schedule next poll
+            gpuMonitorPollTimeout = setTimeout(pollGpuData, gpuMonitorRefreshInterval);
+        })
+        .catch(err => {
+            console.error('GPU monitor poll error:', err);
+            gpuMonitorPollTimeout = setTimeout(pollGpuData, gpuMonitorRefreshInterval);
+        });
+}
+
+function renderGpuCards(gpus) {
+    const container = document.getElementById('gpu-cards-container');
+    if (!gpus || gpus.length === 0) {
+        container.innerHTML = '<div class="card" style="text-align: center; padding: 40px; color: var(--text-muted);">No GPUs detected</div>';
+        return;
+    }
+    
+    let html = '';
+    for (const gpu of gpus) {
+        const vramPct = gpu.vram_total_mb > 0 ? ((gpu.vram_used_mb / gpu.vram_total_mb) * 100).toFixed(1) : '0.0';
+        const assignedText = gpu.assigned_to || '<span style="color: var(--text-muted);">Not assigned</span>';
+        
+        html += `
+            <div class="card" style="border-left: 4px solid ${gpu.temp_c > 75 ? '#ef4444' : gpu.temp_c > 60 ? '#f59f00' : '#34d399'};">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <div class="card-title" style="margin: 0;">
+                        🎮 GPU ${gpu.index} — ${gpu.name}
+                    </div>
+                    <span class="badge" style="background: rgba(52, 211, 153, 0.1); color: #34d399; font-size: 11px;">
+                        PCI: ${gpu.pci_bus_id}
+                    </span>
+                </div>
+                
+                <!-- VRAM Usage -->
+                <div style="margin-bottom: 12px;">
+                    <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; color: var(--text-secondary);">
+                        <span>VRAM</span>
+                        <span class="mono">${(gpu.vram_used_mb / 1024).toFixed(1)} / ${(gpu.vram_total_mb / 1024).toFixed(1)} GB (${vramPct}%)</span>
+                    </div>
+                    <div style="display: flex; height: 8px; width: 100%; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,0.05);">
+                        <div style="height: 100%; width: ${vramPct}%; background: linear-gradient(90deg, #4c6ef5, #9d4edd); transition: width 0.5s;"></div>
+                    </div>
+                </div>
+                
+                <!-- Metrics Grid -->
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                    <div>
+                        <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">Temperature</div>
+                        <div class="stat-value mono" style="font-size: 16px; ${gpu.temp_c > 75 ? 'color: #ef4444;' : gpu.temp_c > 60 ? 'color: #f59f00;' : ''}">${gpu.temp_c || '--'}°C</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">Fan Speed</div>
+                        <div class="stat-value mono" style="font-size: 16px;">${gpu.fan_pct || '--'}%</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">PCIe</div>
+                        <div class="stat-value mono" style="font-size: 14px;">Gen${gpu.pcie_gen || '?'} x${gpu.pcie_width_max || '?'}</div>
+                    </div>
+                </div>
+                
+                <!-- Assignment Info -->
+                <div style="margin-top: 12px; padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: var(--radius-sm); font-size: 11px;">
+                    <span style="color: var(--text-muted);">Assigned to:</span> 
+                    <span style="font-weight: 500; color: #34d399;">${assignedText}</span>
+                </div>
+            </div>`;
+    }
+    
+    container.innerHTML = html;
+}
+
+function updateAggregateStats(aggregate, gpus) {
+    if (!aggregate || !gpus.length) return;
+    
+    const totalGb = (aggregate.total_vram_mb / 1024).toFixed(1);
+    const usedGb = (aggregate.used_vram_mb / 1024).toFixed(1);
+    const freeGb = ((aggregate.free_vram_mb || aggregate.total_vram_mb - aggregate.used_vram_mb) / 1024).toFixed(1);
+    const pct = aggregate.total_vram_mb > 0 ? ((aggregate.used_vram_mb / aggregate.total_vram_mb) * 100).toFixed(1) : '0.0';
+    
+    // Average temperature
+    let totalTemp = 0, tempCount = 0;
+    for (const gpu of gpus) {
+        if (gpu.temp_c > 0) { totalTemp += gpu.temp_c; tempCount++; }
+    }
+    const avgTemp = tempCount > 0 ? (totalTemp / tempCount).toFixed(0) : '--';
+    
+    document.getElementById('gpu-total-vram').textContent = `${totalGb} GB`;
+    document.getElementById('gpu-used-vram').textContent = `${usedGb} / ${totalGb} GB`;
+    document.getElementById('gpu-free-vram').textContent = `${freeGb} GB`;
+    document.getElementById('gpu-avg-temp').textContent = `${avgTemp}°C`;
+    document.getElementById('gpu-vram-pct').textContent = `${pct}%`;
+    
+    const fillEl = document.getElementById('gpu-vram-fill');
+    if (fillEl) fillEl.style.width = `${pct}%`;
+}
+
+function updateGpuChart() {
+    fetch('/api/gpus/monitor')
+        .then(res => res.json())
+        .then(data => {
+            const history = data.history;
+            if (!history || !history.timestamps.length) {
+                // No history yet, create empty chart
+                if (gpuHistoryChart) gpuHistoryChart.destroy();
+                
+                const ctx = document.getElementById('gpuHistoryChart').getContext('2d');
+                gpuHistoryChart = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels: [], datasets: [] },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        scales: {
+                            x: { display: false },
+                            y: { beginAtZero: true, title: { display: true, text: 'VRAM (MB)' } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+                return;
+            }
+            
+            const timestamps = history.timestamps;
+            const nPoints = Math.min(timestamps.length, 300); // Max 300 points for chart
+            const startIdx = Math.max(0, timestamps.length - nPoints);
+            const labels = timestamps.slice(startIdx).map((t, i) => {
+                const d = new Date(t * 1000);
+                return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+            });
+            
+            const datasets = [];
+            
+            // GPU VRAM layers (only if checkbox is checked)
+            for (let i = 0; i < 2; i++) {
+                const cbId = `chart-layer-vram${i}`;
+                const cbEl = document.getElementById(cbId);
+                if (!cbEl || !cbEl.checked) continue;
+                
+                const vramData = history.gpu_vram_used_mb[i];
+                if (vramData && vramData.length > startIdx) {
+                    datasets.push({
+                        label: `GPU${i} VRAM`,
+                        data: vramData.slice(startIdx),
+                        borderColor: i === 0 ? '#4c6ef5' : '#9d4ede',
+                        backgroundColor: i === 0 ? 'rgba(76,110,245,0.1)' : 'rgba(157,78,222,0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0
+                    });
+                }
+            }
+            
+            // Temperature layer (secondary Y-axis)
+            const tempCb = document.getElementById('chart-layer-temp');
+            if (!tempCb || !tempCb.checked) {
+                // No layers to show
+                gpuHistoryChart.data.labels = labels;
+                gpuHistoryChart.data.datasets = [];
+                gpuHistoryChart.options.scales.y.title.text = 'VRAM (MB)';
+                gpuHistoryChart.update();
+                return;
+            }
+            
+            const tempData = history.gpu_temp_c[0];
+            if (tempData && tempData.length > startIdx) {
+                datasets.push({
+                    label: 'Temp',
+                    data: tempData.slice(startIdx),
+                    borderColor: '#ef4444',
+                    borderWidth: 2,
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    yAxisID: 'yTemp'
+                });
+            }
+            
+            gpuHistoryChart.data.labels = labels;
+            gpuHistoryChart.data.datasets = datasets;
+            
+            // Configure dual Y-axis if temperature is shown
+            const hasTemp = datasets.some(d => d.yAxisID === 'yTemp');
+            if (hasTemp) {
+                gpuHistoryChart.options.scales.y.title.text = 'VRAM (MB)';
+                gpuHistoryChart.options.scales.yTemp = {
+                    type: 'category',
+                    position: 'right',
+                    title: { display: true, text: 'Temperature (°C)' },
+                    grid: { drawOnChartArea: false },
+                    ticks: { color: '#ef4444' }
+                };
+            } else {
+                delete gpuHistoryChart.options.scales.yTemp;
+            }
+            
+            gpuHistoryChart.update();
+        })
+        .catch(err => console.error('GPU chart update error:', err));
+}
+
+// Initialize GPU Monitor when tab is switched to
+const originalSwitchTab = window.switchTab;
+window.switchTab = function(tabId) {
+    if (originalSwitchTab) originalSwitchTab(tabId);
+    
+    if (tabId === 'gpu-monitor') {
+        // Ensure chart exists
+        const canvas = document.getElementById('gpuHistoryChart');
+        if (canvas && !gpuHistoryChart) {
+            const ctx = canvas.getContext('2d');
+            gpuHistoryChart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    scales: {
+                        x: { display: false },
+                        y: { beginAtZero: true, title: { display: true, text: 'VRAM (MB)' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+    }
+};
+
+// Start GPU Monitor polling on page load
+window.addEventListener('load', function() {
+    // Initialize GPU monitor data immediately
+    pollGpuData();
+    
+    // Schedule periodic refresh (every 2 seconds)
+    setInterval(function() {
+        if (document.getElementById('tab-gpu-monitor').classList.contains('active')) {
+            pollGpuData();
+        }
+    }, gpuMonitorRefreshInterval);
+});
+
+// ============================================================
+// AUTO-TUNE & SAFE ZONE FUNCTIONS
+// ============================================================
+let safeZoneMin = 0.1;
+let safeZoneMax = 1.0;
+let recommendedValue = 0.88;
+let autoTuneCompleted = false;
+
+function updateSafeZoneVisual() {
+    const slider = document.getElementById('cfg-gpu-memory-utilization');
+    if (!slider) return;
+    
+    const val = parseFloat(slider.value);
+    const minVal = parseFloat(slider.min);
+    const maxVal = parseFloat(slider.max);
+    const range = maxVal - minVal;
+    
+    // BEFORE auto-tune: hide all safe zone elements, show full range status
+    if (!autoTuneCompleted) {
+        const bgEl = document.getElementById('safe-zone-bg');
+        if (bgEl) bgEl.style.display = 'none';
+        
+        const labelsEl = document.getElementById('safe-zone-labels');
+        if (labelsEl) labelsEl.style.display = 'none';
+        
+        const infoEl = document.getElementById('safe-zone-info');
+        if (infoEl) infoEl.style.display = 'none';
+        
+        // Update status badge to pre-auto-tune state
+        const dotEl = document.getElementById('util-status-dot');
+        const textEl = document.getElementById('util-status-text');
+        if (dotEl) {
+            dotEl.style.background = '#f59f00';
+            dotEl.title = 'Auto-Tune not yet run';
+        }
+        if (textEl) {
+            textEl.textContent = 'Auto-Tune not yet run — full range (0.1–1.0) available';
+        }
+        
+        return;
+    }
+    
+    // AFTER auto-tune: show safe zone highlighting and info
+    const safeLeftPct = ((safeZoneMin - minVal) / range) * 100;
+    const safeWidthPct = ((safeZoneMax - safeZoneMin) / range) * 100;
+    
+    // Show green safe zone band
+    const bgEl = document.getElementById('safe-zone-bg');
+    if (bgEl) {
+        bgEl.style.left = `${Math.max(0, safeLeftPct)}%`;
+        bgEl.style.width = `${Math.min(100 - safeLeftPct, 100)}%`;
+        bgEl.style.display = 'block';
+    }
+    
+    // Show min/max labels above safe zone
+    const labelsEl = document.getElementById('safe-zone-labels');
+    if (labelsEl) {
+        labelsEl.style.display = 'block';
+        labelsEl.innerHTML = `<span style="position: absolute; left: ${Math.max(1, safeLeftPct)}%; transform: translateX(-50%); color: #34d399;">▼ Min</span>
+                                <span style="position: absolute; right: ${Math.max(1, 100 - safeLeftPct - safeWidthPct)}%; transform: translateX(50%); color: #34d399;">Max ▼</span>`;
+    }
+    
+    // Show info box with safe range details
+    const infoEl = document.getElementById('safe-zone-info');
+    if (infoEl) {
+        infoEl.style.display = 'block';
+        document.getElementById('safe-range-text').textContent = `${safeZoneMin.toFixed(2)} — ${safeZoneMax.toFixed(2)}`;
+        document.getElementById('recommended-val').textContent = recommendedValue.toFixed(2);
+    }
+    
+    // Update status badge to post-auto-tune state
+    const dotEl = document.getElementById('util-status-dot');
+    const textEl = document.getElementById('util-status-text');
+    if (dotEl) {
+        dotEl.style.background = '#34d399';
+        dotEl.title = 'Auto-Tune completed — safe range highlighted';
+    }
+    if (textEl) {
+        textEl.textContent = `Auto-Tuned safe range: ${safeZoneMin.toFixed(2)}–${safeZoneMax.toFixed(2)} | Recommended: ${recommendedValue.toFixed(2)}`;
+    }
+}
+
+function onAutotuneModeChanged() {
+    const mode = document.getElementById('header-autotune-mode').value;
+    
+    if (mode === 'autotune') {
+        // Prompt user to run auto-tune
+        showAutoTuneConfirmation();
+    } else {
+        // Switched back to manual — keep safe zone visible, don't reset
+        recommendedValue = parseFloat(document.getElementById('cfg-gpu-memory-utilization').value) || 0.88;
+        updateSafeZoneVisual();
+    }
+}
+
+function completeAutoTune(minVal, maxVal, recVal) {
+    /** Called when auto-tune completes successfully — sets safe zone and updates UI */
+    autoTuneCompleted = true;
+    safeZoneMin = parseFloat(minVal);
+    safeZoneMax = parseFloat(maxVal);
+    recommendedValue = parseFloat(recVal);
+    
+    // Update the slider value to recommended
+    const slider = document.getElementById('cfg-gpu-memory-utilization');
+    if (slider) {
+        slider.value = recommendedValue;
+        document.getElementById('gpu-val').innerText = recommendedValue.toFixed(2);
+    }
+    
+    updateSafeZoneVisual();
+}
+
+function resetAutoTuneState() {
+    /** Reset safe zone to pre-auto-tune state */
+    autoTuneCompleted = false;
+    safeZoneMin = 0.1;
+    safeZoneMax = 1.0;
+    recommendedValue = parseFloat(document.getElementById('cfg-gpu-memory-utilization').value) || 0.88;
+    updateSafeZoneVisual();
+}
+
+function showAutoTuneConfirmation() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 9999;';
+    modal.innerHTML = `
+        <div class="modal" style="max-width: 500px;">
+            <div class="modal-header">
+                <h4 class="modal-title">🔬 Run Auto-Tune Diagnostic</h4>
+                <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove(); document.getElementById('header-autotune-mode').value = 'manual';" style="padding: 2px 6px;">✕</button>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 12px; font-size: 13px; color: var(--text-secondary);">
+                    Auto-Tune will test different GPU memory utilization levels (0.60–0.95) to find the safe operating range for your specific hardware and model.
+                </p>
+                <div style="background: rgba(245, 159, 0, 0.05); border-left: 3px solid #f59f00; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary); margin-bottom: 16px;">
+                    <strong style="color: #f59f00;">⚠️ Note:</span></strong> This will run inference tests that may take several minutes. The vLLM container will be restarted during testing.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="this.closest('.modal-overlay').remove(); document.getElementById('header-autotune-mode').value = 'manual';">Cancel</span></button>
+                <button class="btn btn-primary" onclick="startAutotuneFromHeader()">🔬 Run Auto-Tune Now</span></button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+function startAutotuneFromHeader() {
+    // Close modal
+    const overlay = document.querySelector('.modal-overlay.active');
+    if (overlay) overlay.remove();
+    
+    // Switch to benchmark tab and trigger auto-tune
+    switchTab('benchmark');
+    
+    // Scroll to auto-tune section and click the button
+    setTimeout(() => {
+        const autotuneBtn = document.getElementById('btn-start-autotune-diagnostic');
+        if (autotuneBtn) {
+            autotuneBtn.click();
+        } else {
+            alert('Auto-Tune button not found. Please run Auto-Tune from the Benchmark tab.');
+        }
+    }, 500);
+}
+
+function showAutoTuneHelp() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 9999;';
+    modal.innerHTML = `
+        <div class="modal" style="max-width: 550px;">
+            <div class="modal-header">
+                <h4 class="modal-title">ℹ️ How Auto-Tune Works</h4>
+                <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove();" style="padding: 2px 6px;">✕</button>
+            </div>
+            <div class="modal-body" style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                <p><strong>Auto-Tune</strong> runs a series of inference tests at different GPU memory utilization levels (0.60–0.95) to find the safe operating range for your specific hardware and model.</p>
+                
+                <div style="background: rgba(0, 240, 255, 0.03); border-left: 3px solid var(--accent-cyan); padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px;">
+                    <strong style="color: var(--accent-cyan);">What it tests:</span></strong><br>
+                    • Memory utilization levels from 0.60 to 0.95<br>
+                    • Inference stability at each level (no OOM crashes)<br>
+                    • Token throughput consistency
+                </div>
+                
+                <p><strong>Result:</strong> A safe operating range is calculated, and the recommended value is set automatically in the GPU Memory Utilization slider.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="this.closest('.modal-overlay').remove();">Got it</span></button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// Wire up safe zone visual on page load
+window.addEventListener('load', function() {
+    const slider = document.getElementById('cfg-gpu-memory-utilization');
+    if (slider) {
+        slider.addEventListener('input', updateSafeZoneVisual);
+        // Initial call to set up safe zone visual
+        setTimeout(updateSafeZoneVisual, 1000);
+    }
+});
+
+// ============================================================
+// HELP WIZARD OVERLAY (Chat Widget Style)
+// ============================================================
+let helpWizardOpen = false;
+
+function toggleHelpWizard() {
+    const wizard = document.getElementById('help-wizard-overlay');
+    if (!wizard) return;
+    
+    helpWizardOpen = !helpWizardOpen;
+    if (helpWizardOpen) {
+        wizard.style.display = 'flex';
+        wizard.classList.add('active');
+    } else {
+        wizard.style.display = 'none';
+        wizard.classList.remove('active');
+    }
+}
+
+function showHelpSection(sectionId) {
+    const contentEl = document.getElementById('help-wizard-content');
+    if (!contentEl) return;
+    
+    const helpContent = {
+        'model': `
+            <h4 style="margin-bottom: 8px;">🧠 Model Settings</h4>
+            <p><strong>Model ID / Path:</strong> Select from your downloaded models or enter a HuggingFace repo ID (e.g., <code>nvidia/Qwen3.6-35B-A3B-NVFP4</code>). Clear the text to see all downloaded models.</p>
+            <p><strong>Served Model Name:</strong> The name exposed to the OpenAI API. Can differ from the actual model ID.</p>
+            <p><strong>Trust Remote Code:</strong> Allows loading custom models that execute Python scripts. Enable only for trusted models.</p>
+        `,
+        'gpu-selection': `
+            <h4 style="margin-bottom: 8px;">🎮 GPU Selection</h4>
+            <p><strong>Available GPUs:</strong> Lists all detected GPUs with their PCI Bus IDs (unique identifiers even for identical cards).</p>
+            <p><strong>TP/PP Slot Assignment:</strong> Select which specific GPU to use for each Tensor Parallel (TP) or Pipeline Parallel (PP) slot. Changes are saved automatically and applied on next container start.</p>
+            <p><strong>PCI Bus ID:</strong> The unique identifier for each GPU (e.g., <code>0000:41:00.0</code>). Use this to reference specific GPUs even when multiple identical cards are present.</p>
+        `,
+        'memory': `
+            <h4 style="margin-bottom: 8px;">💾 Memory & Allocation</h4>
+            <p><strong>GPU Memory Utilization:</strong> Hard ceiling for VRAM usage (0.0–1.0). After Auto-Tune, a safe range is highlighted in green.</p>
+            <p><strong>Safe Zone:</strong> The green highlighted area shows the tested safe operating range. Values outside this range may cause OOM crashes or performance degradation.</p>
+            <p><strong>KV Cache Data Type:</strong> Choose 'fp8' to save ~50% VRAM on KV cache with minimal quality loss. Use 'auto' for standard precision.</p>
+        `,
+        'context': `
+            <h4 style="margin-bottom: 8px;">📐 Context Settings</h4>
+            <p><strong>Max Model Length:</strong> Upper context ceiling per request (tokens). Set to 16384 or 32768 for larger file scanning.</p>
+            <p><strong>Max Num Batched Tokens:</strong> Determines prefill batch size. Match with Max Model Length for chunked prefill.</p>
+        `,
+        'gpu-monitor': `
+            <h4 style="margin-bottom: 8px;">🎮 GPU Monitor</h4>
+            <p><strong>Real-time Metrics:</strong> Per-GPU VRAM, temperature, fan speed updated every 2 seconds.</p>
+            <p><strong>24-Hour History Chart:</strong> Toggle layers (GPU0 VRAM, GPU1 VRAM, Temperature) with checkboxes. Hover over data points for exact values at that timestamp.</p>
+        `
+    };
+    
+    contentEl.innerHTML = helpContent[sectionId] || '<h4>No help available</h4>';
+}
+
+function showHelpWizardForCurrentSection() {
+    // Determine current config section and show relevant help
+    const activeSection = document.querySelector('.config-section.active');
+    if (activeSection) {
+        const id = activeSection.id.replace('cfg-sect-', '');
+        toggleHelpWizard();
+        setTimeout(() => showHelpSection(id), 100);
+    } else {
+        // Default to model help
+        toggleHelpWizard();
+        setTimeout(() => showHelpSection('model'), 100);
+    }
+}
+
+// Wire up Help Wizard button on page load
+window.addEventListener('load', function() {
+    const helpBtn = document.getElementById('help-wizard-btn');
+    if (helpBtn) {
+        helpBtn.addEventListener('click', showHelpWizardForCurrentSection);
+    }
+});
+
+// ============================================================
+// CONTEXT-SPECIFIC HELP MODALS
+// ============================================================
+
+function showContextHelp() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 9999;';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 550px;">
+            <div class="modal-header">
+                <h4 class="modal-title">📏 Context Window Settings</h4>
+                <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove();" style="padding: 2px 6px;">✕</button>
+            </div>
+            <div class="modal-body" style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                <p><strong>Max Model Length (Context Window):</strong> The maximum number of tokens the model can process in a single request. Higher values allow longer conversations but consume more VRAM.</p>
+                <ul style="margin: 8px 0; padding-left: 20px;">
+                    <li><code>8192</code> — Default, good for most chat use cases</li>
+                    <li><code>16384</code> — Extended context for longer conversations</li>
+                    <li><code>32768</code> — Maximum for large file scanning or document analysis</li>
+                </ul>
+                <p style="margin-top: 8px;"><strong>Max Num Batched Tokens:</strong> Controls how many tokens are processed in parallel during the prefill phase. Match this with Max Model Length for chunked prefill to work optimally.</p>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+}
+
+function showCalculatorHelp() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 9999;';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 550px;">
+            <div class="modal-header">
+                <h4 class="modal-title">📊 KV Cache Calculator</h4>
+                <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove();" style="padding: 2px 6px;">✕</button>
+            </div>
+            <div class="modal-body" style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                <p>This calculator estimates how many tokens your GPU can hold in the KV cache based on:</p>
+                <ul style="margin: 8px 0; padding-left: 20px;">
+                    <li><strong>Model parameters</strong> — layers, KV heads, head dimension, and weight size determine baseline VRAM usage</li>
+                    <li><strong>Total VRAM</strong> — your GPU's total memory in GB</li>
+                    <li><strong>GPU Utilization Ceiling</strong> — the fraction of VRAM reserved for KV cache (0.88 = 88%)</li>
+                    <li><strong>KV Precision</strong> — fp8 uses half the VRAM of auto/fp16 at minor quality cost</li>
+                </ul>
+                <p style="margin-top: 8px;"><strong>Token Pool:</strong> The total number of tokens your GPU can store across all concurrent requests. Adjust Agent Context Length and Target Seats to see how many agents you can run simultaneously.</p>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+}
+
+function showContextExplanationModal() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 9999;';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 500px;">
+            <div class="modal-header">
+                <h4 class="modal-title">❓ Why is usable context smaller than max context?</h4>
+                <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove();" style="padding: 2px 6px;">✕</button>
+            </div>
+            <div class="modal-body" style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                <p>The <strong>Max Model Length</strong> is the theoretical ceiling, but actual usable context per request is smaller due to:</p>
+                <ol style="margin: 8px 0; padding-left: 20px;">
+                    <li><strong>KV Cache overhead</strong> — Each token stored in KV cache consumes VRAM proportional to model size</li>
+                    <li><strong>Concurrency slots</strong> — Max Number of Sequences limits how many concurrent requests can hold context</li>
+                    <li><strong>Prefill/Decode split</strong> — During prefill, tokens aren't yet in KV cache; during decode, each token consumes cache space</li>
+                </ol>
+                <p style="margin-top: 8px;"><strong>To maximize usable context:</strong> Increase Max Model Length, reduce concurrency seats if running fewer agents, and consider fp8 KV precision to free VRAM.</p>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+}
+
+</script>
+
+<!-- Help Wizard Overlay -->
+<div id="help-wizard-overlay" style="display: none; position: fixed; bottom: 80px; right: 20px; width: 450px; max-height: 70vh; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: var(--radius-md); box-shadow: 0 8px 32px rgba(0,0,0,0.4); z-index: 9998; display: none; flex-direction: column;">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border-color); background: rgba(0,240,255,0.03);">
+        <h4 style="margin: 0; font-size: 14px; color: var(--accent-cyan); display: flex; align-items: center; gap: 8px;">
+            🤖 Configuration Help Wizard
+        </h4>
+        <button class="btn btn-sm" onclick="toggleHelpWizard()" style="padding: 2px 6px;">✕</button>
+    </div>
+    
+    <div id="help-wizard-content" style="flex: 1; overflow-y: auto; padding: 16px; font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+        <p style="margin-bottom: 12px;">Click a configuration section in the Config tab, then click the 🤖 button to see contextual help for that section.</p>
+        
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;">
+            <button class="btn btn-sm" onclick="showHelpSection('model')" style="font-size: 11px;">🧠 Model</span></button>
+            <button class="btn btn-sm" onclick="showHelpSection('gpu-selection')" style="font-size: 11px;">🎮 GPU Selection</span></button>
+            <button class="btn btn-sm" onclick="showHelpSection('memory')" style="font-size: 11px;">💾 Memory</span></button>
+            <button class="btn btn-sm" onclick="showHelpSection('context')" style="font-size: 11px;">📐 Context</span></button>
+        </div>
+    </div>
+    
+    <div style="padding: 8px 16px; border-top: 1px solid var(--border-color); font-size: 10px; color: var(--text-muted); text-align: center;">
+        Tip: Click the 🤖 button in the header to open contextual help for your current section.
+    </div>
+</div>
+
+<!-- Help Wizard Toggle Button (Floating) -->
+<button id="help-wizard-btn" class="btn btn-primary" style="position: fixed; bottom: 20px; right: 20px; width: 48px; height: 48px; border-radius: 50%; font-size: 20px; z-index: 9997; box-shadow: 0 4px 16px rgba(0,0,0,0.3);" title="Open Configuration Help Wizard">🤖</button>
+
+</script>
 
 </body>
 </html>
