@@ -3450,10 +3450,12 @@ def _parse_nvidia_smi() -> List[Dict]:
         nvidia_smi_cmd = "nvidia-smi"
         if _sys.platform == "win32":
             nvidia_smi_cmd = "nvidia-smi.exe"
-            # Try common NVIDIA driver installation paths on Windows
+            # Try common NVIDIA driver installation paths on Windows (expanded)
             for base_path in [
                 r"C:\Program Files\NVIDIA Corporation\NVSMI",
                 r"C:\Windows\System32",
+                r"C:\Program Files\NVIDIA Corporation\NVIDIA NvDLIA",
+                r"C:\Windows\Sysnative",
             ]:
                 try:
                     full_path = os.path.join(base_path, "nvidia-smi.exe")
@@ -3462,6 +3464,20 @@ def _parse_nvidia_smi() -> List[Dict]:
                         break
                 except Exception:
                     continue
+            
+            # If still not found, try to find via where command or add to PATH
+            if nvidia_smi_cmd == "nvidia-smi.exe":
+                try:
+                    res = subprocess.run(
+                        ["where", "nvidia-smi"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        first_line = res.stdout.strip().splitlines()[0]
+                        if os.path.exists(first_line):
+                            nvidia_smi_cmd = first_line
+                except Exception:
+                    pass
         
         # Try direct subprocess call first (list form - more reliable)
         try:
@@ -4524,6 +4540,164 @@ def start_system_update(background_tasks: BackgroundTasks):
 @app.get("/api/update/status")
 def get_system_update_status():
     return active_system_updates
+
+@app.get("/api/gpus/debug")
+def gpu_debug_info():
+    """Debug endpoint to test GPU detection with detailed logging."""
+    import subprocess as _subprocess
+    import sys as _sys
+    
+    debug_data = {
+        "platform": _sys.platform,
+        "python_version": _sys.version,
+        "methods_tried": [],
+        "nvidia_smi_paths_checked": [],
+        "final_gpus": []
+    }
+    
+    # Check nvidia-smi paths
+    if _sys.platform == "win32":
+        for base_path in [
+            r"C:\Program Files\NVIDIA Corporation\NVSMI",
+            r"C:\Windows\System32",
+            r"C:\Program Files\NVIDIA Corporation\NVIDIA NvDLIA",
+            r"C:\Windows\Sysnative",
+        ]:
+            full_path = os.path.join(base_path, "nvidia-smi.exe")
+            debug_data["nvidia_smi_paths_checked"].append({
+                "path": full_path,
+                "exists": os.path.exists(full_path)
+            })
+        
+        # Check where command
+        try:
+            res = _subprocess.run(["where", "nvidia-smi"], stdout=_subprocess.PIPE, stderr=_subprocess.PIPE, text=True, timeout=3.0)
+            debug_data["where_command"] = {
+                "returncode": res.returncode,
+                "output": res.stdout.strip() if res.returncode == 0 else res.stderr.strip()
+            }
+        except Exception as e:
+            debug_data["where_command"] = {"error": str(e)}
+    
+    # Method 1: nvidia-smi subprocess
+    try:
+        import subprocess
+        nvidia_smi_cmd = "nvidia-smi" if _sys.platform != "win32" else "nvidia-smi.exe"
+        res = subprocess.run(
+            [nvidia_smi_cmd, "--query-gpu=index,name --format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5.0
+        )
+        debug_data["methods_tried"].append({
+            "method": "nvidia-smi subprocess",
+            "returncode": res.returncode,
+            "stdout": res.stdout[:200] if res.stdout else None,
+            "stderr": res.stderr[:200] if res.stderr else None,
+            "success": res.returncode == 0 and bool(res.stdout.strip())
+        })
+    except Exception as e:
+        debug_data["methods_tried"].append({
+            "method": "nvidia-smi subprocess",
+            "error": str(e),
+            "success": False
+        })
+    
+    # Method 2: NVML ctypes
+    try:
+        import ctypes
+        nvml_success = False
+        lib_paths_to_try = []
+        if _sys.platform == "win32":
+            for base in [r"C:\Windows\System32", r"C:\Program Files\NVIDIA Corporation"]:
+                try:
+                    full = os.path.join(base, "nvcuda.dll")
+                    if os.path.exists(full):
+                        lib_paths_to_try.append(full)
+                        break
+                except Exception:
+                    continue
+            for name in ["libnvml.so", "libnvml.so.1", "nvcuda.dll"]:
+                lib_paths_to_try.append(name)
+        else:
+            for path in ["/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", 
+                         "/usr/lib/libnvidia-ml.so.1", "libnvml.so.1", "libnvml.so"]:
+                lib_paths_to_try.append(path)
+        
+        nvml_lib = None
+        for lib_path in lib_paths_to_try:
+            try:
+                nvml_lib = ctypes.CDLL(lib_path)
+                break
+            except Exception:
+                continue
+        
+        if nvml_lib is not None:
+            nvml_lib.nvmlInit_v2.restype = ctypes.c_int
+            init_ret = nvml_lib.nvmlInit_v2()
+            if init_ret == 0:
+                nvml_lib.nvmlDeviceGetCount_v2.restype = ctypes.c_int
+                count = ctypes.c_uint(0)
+                ret = nvml_lib.nvmlDeviceGetCount_v2(ctypes.byref(count))
+                debug_data["methods_tried"].append({
+                    "method": "NVML ctypes",
+                    "lib_loaded": True,
+                    "init_code": init_ret,
+                    "count_code": ret,
+                    "device_count": count.value,
+                    "success": count.value > 0
+                })
+            else:
+                debug_data["methods_tried"].append({
+                    "method": "NVML ctypes",
+                    "lib_loaded": True,
+                    "init_failed": init_ret,
+                    "success": False
+                })
+        else:
+            debug_data["methods_tried"].append({
+                "method": "NVML ctypes",
+                "lib_loaded": False,
+                "success": False
+            })
+    
+    except Exception as e:
+        debug_data["methods_tried"].append({
+            "method": "NVML ctypes",
+            "error": str(e),
+            "success": False
+        })
+    
+    # Method 3: PyTorch CUDA
+    try:
+        import torch
+        if torch.cuda.is_available():
+            debug_data["methods_tried"].append({
+                "method": "PyTorch CUDA",
+                "available": True,
+                "device_count": torch.cuda.device_count(),
+                "devices": [torch.cuda.get_device_properties(i).name for i in range(torch.cuda.device_count())],
+                "success": True
+            })
+        else:
+            debug_data["methods_tried"].append({
+                "method": "PyTorch CUDA",
+                "available": False,
+                "success": False
+            })
+    except Exception as e:
+        debug_data["methods_tried"].append({
+            "method": "PyTorch CUDA",
+            "error": str(e),
+            "success": False
+        })
+    
+    # Final GPU parse for comparison
+    try:
+        gpus = _parse_nvidia_smi()
+        debug_data["final_gpus"] = [{"index": g["index"], "name": g["name"], "vram_total_mb": g["vram_total_mb"]} for g in gpus]
+    except Exception as e:
+        debug_data["final_parse_error"] = str(e)
+    
+    return debug_data
 
 # Mount static files and templates
 # Wait! Let's ensure directories exist first before mounting
