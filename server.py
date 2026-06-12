@@ -41,6 +41,8 @@ app.add_middleware(
 def on_startup():
     load_last_verified_context()
     load_last_speed_diagnostic()
+    _load_gpu_history()
+    _start_gpu_history_recorder()
     t = threading.Thread(target=vllm_container_monitor_loop, daemon=True)
     t.start()
 
@@ -3784,17 +3786,6 @@ def _start_gpu_history_recorder():
     t.start()
     logger.info("GPU history recorder started (records every 60s)")
 
-# Register the recorder to run on app startup
-@app.on_event("startup")
-def _register_startup_hooks():
-    load_last_verified_context()
-    load_last_speed_diagnostic()
-    t = threading.Thread(target=vllm_container_monitor_loop, daemon=True)
-    t.start()
-    # Load persisted GPU history and start recorder
-    _load_gpu_history()
-    _start_gpu_history_recorder()
-
 # ============================================================
 # API ENDPOINTS: GPU MONITOR & SELECTION
 # ============================================================
@@ -3900,6 +3891,18 @@ def stop_vllm_container():
         logger.info(f"Stopping container {VLLM_CONTAINER_NAME}...")
         container.stop()
         return {"status": "stopping", "message": f"Container {VLLM_CONTAINER_NAME} has been stopped."}
+    except Exception as e:
+        logger.error(f"Failed to stop container: {e}")
+        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
+
+@app.post("/api/container/stop")
+def stop_vllm_container_endpoint():
+    try:
+        client = docker.from_env()
+        container = client.containers.get(VLLM_CONTAINER_NAME)
+        logger.info(f"Stopping container {VLLM_CONTAINER_NAME}...")
+        container.stop(timeout=30)
+        return {"status": "stopped", "message": f"Container {VLLM_CONTAINER_NAME} has been stopped."}
     except Exception as e:
         logger.error(f"Failed to stop container: {e}")
         raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
@@ -4529,6 +4532,43 @@ def get_version():
         except Exception:
             pass
     return {"version": "1.000"}
+
+@app.get("/api/update/check")
+def check_for_update():
+    """Check if a newer version is available on GitHub."""
+    local_version_path = os.path.join(os.path.dirname(__file__), "version.txt")
+    local_ver = "1.000"
+    try:
+        with open(local_version_path, "r", encoding="utf-8") as f:
+            local_ver = f.read().strip()
+    except Exception:
+        pass
+
+    remote_ver = None
+    url_available = False
+    try:
+        import httpx
+        gh_url = "https://raw.githubusercontent.com/jeffreyhughes/vLLM-Container-Manager/main/version.txt"
+        with httpx.Client(timeout=5) as client:
+            resp = client.get(gh_url)
+            if resp.status_code == 200:
+                remote_ver = resp.text.strip()
+                url_available = True
+    except Exception:
+        pass
+
+    newer = False
+    if remote_ver and local_ver != remote_ver:
+        try:
+            newer = float(remote_ver) > float(local_ver)
+        except ValueError:
+            newer = bool(remote_ver)
+    return {
+        "local_version": local_ver,
+        "remote_version": remote_ver or local_ver,
+        "has_update": newer,
+        "url_available": url_available,
+    }
 
 @app.post("/api/update")
 def start_system_update(background_tasks: BackgroundTasks):
